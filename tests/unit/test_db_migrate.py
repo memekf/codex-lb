@@ -97,7 +97,7 @@ def test_inspect_migration_state_no_upgrade_after_head(tmp_path: Path) -> None:
     assert state.has_alembic_version_table is True
 
 
-def test_run_upgrade_head_adds_managed_proxy_schema(tmp_path: Path) -> None:
+def test_run_upgrade_head_adds_account_proxy_and_active_timeframe_schema(tmp_path: Path) -> None:
     db_path = tmp_path / "managed-proxies.db"
     url = _db_url(db_path)
 
@@ -121,6 +121,36 @@ def test_run_upgrade_head_adds_managed_proxy_schema(tmp_path: Path) -> None:
         }.issubset(proxy_columns)
         account_columns = {column["name"] for column in inspector.get_columns("accounts")}
         assert "proxy_id" in account_columns
+        assert "active_timeframe_id" in account_columns
+        account_indexes = {index["name"] for index in inspector.get_indexes("accounts")}
+        assert "idx_accounts_proxy_id" in account_indexes
+        assert "idx_accounts_active_timeframe_id" in account_indexes
+        account_foreign_keys = {
+            tuple(fk["constrained_columns"]): fk["referred_table"]
+            for fk in inspector.get_foreign_keys("accounts")
+        }
+        assert ("proxy_id",) in account_foreign_keys
+        assert account_foreign_keys[("proxy_id",)] == "account_proxies"
+        assert ("active_timeframe_id",) in account_foreign_keys
+        assert account_foreign_keys[("active_timeframe_id",)] == "account_active_timeframes"
+
+        assert "account_active_timeframes" in inspector.get_table_names()
+        timeframe_columns = {column["name"] for column in inspector.get_columns("account_active_timeframes")}
+        assert {
+            "id",
+            "display_name",
+            "timezone",
+            "start_minute",
+            "end_minute",
+            "mode",
+            "weekdays",
+            "random_days_per_week",
+            "random_seed",
+            "created_at",
+            "updated_at",
+        }.issubset(timeframe_columns)
+        timeframe_indexes = {index["name"] for index in inspector.get_indexes("account_active_timeframes")}
+        assert "idx_account_active_timeframes_mode" in timeframe_indexes
         bridge_columns = {column["name"] for column in inspector.get_columns("http_bridge_sessions")}
         assert "proxy_fingerprint" in bridge_columns
 

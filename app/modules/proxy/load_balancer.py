@@ -35,11 +35,17 @@ from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
 from app.db.models import (
     Account,
+    AccountActiveTimeframeMode,
     AccountProxyStatus,
     AccountStatus,
     AdditionalUsageHistory,
     StickySessionKind,
     UsageHistory,
+)
+from app.modules.account_active_timeframes.schedule import (
+    ActiveTimeframeDefinition,
+    decode_timeframe_weekdays,
+    evaluate_active_timeframe,
 )
 from app.modules.account_proxies.validation import normalize_proxy_url
 from app.modules.proxy.account_cache import get_account_selection_cache
@@ -71,6 +77,8 @@ _RECOVERABLE_STATUSES = frozenset(
 NO_PLAN_SUPPORT_FOR_MODEL = "no_plan_support_for_model"
 ADDITIONAL_QUOTA_DATA_UNAVAILABLE = "additional_quota_data_unavailable"
 NO_ADDITIONAL_QUOTA_ELIGIBLE_ACCOUNTS = "no_additional_quota_eligible_accounts"
+ACCOUNT_OUTSIDE_ACTIVE_TIMEFRAME = "account_outside_active_timeframe"
+NO_ACTIVE_TIMEFRAME_ELIGIBLE_ACCOUNTS = "no_active_timeframe_eligible_accounts"
 _ADDITIONAL_QUOTA_EXEMPT_PLAN_TYPES = frozenset({"free", "plus"})
 
 
@@ -416,14 +424,23 @@ class LoadBalancer:
             additional_limit_name,
             None if account_ids is None else tuple(sorted(set(account_ids))),
         )
-        cached = await self._selection_inputs_cache.get(cache_key)
-        if cached is not None:
-            return _clone_selection_inputs(cached)
-
         load_generation = self._selection_inputs_cache.generation
 
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
+            cache_enabled = not _accounts_include_active_timeframe_assignments(all_accounts)
+            if cache_enabled:
+                cached = await self._selection_inputs_cache.get(cache_key)
+                if cached is not None:
+                    return _clone_selection_inputs(cached)
+
+            async def maybe_cache(selection_inputs: _SelectionInputs) -> _SelectionInputs:
+                if cache_enabled:
+                    await self._selection_inputs_cache.set(
+                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
+                    )
+                return selection_inputs
+
             effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
             accounts = _selectable_accounts(all_accounts)
             if account_ids is not None:
@@ -440,10 +457,7 @@ class LoadBalancer:
                         latest_secondary={},
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
-                    await self._selection_inputs_cache.set(
-                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                    )
-                    return selection_inputs
+                    return await maybe_cache(selection_inputs)
                 if not pre_model_filter_accounts:
                     selection_inputs = _SelectionInputs(
                         accounts=[],
@@ -451,10 +465,7 @@ class LoadBalancer:
                         latest_secondary={},
                         runtime_accounts=[_clone_account(account) for account in all_accounts],
                     )
-                    await self._selection_inputs_cache.set(
-                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                    )
-                    return selection_inputs
+                    return await maybe_cache(selection_inputs)
                 selection_inputs = _SelectionInputs(
                     accounts=[],
                     latest_primary={},
@@ -463,10 +474,7 @@ class LoadBalancer:
                     error_message=f"No accounts with a plan supporting model '{model}'",
                     error_code=NO_PLAN_SUPPORT_FOR_MODEL,
                 )
-                await self._selection_inputs_cache.set(
-                    _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                )
-                return selection_inputs
+                return await maybe_cache(selection_inputs)
 
             if effective_limit_name:
                 accounts, error_code, error_message = await self._filter_accounts_for_additional_limit(
@@ -484,10 +492,7 @@ class LoadBalancer:
                         error_message=error_message,
                         error_code=error_code,
                     )
-                    await self._selection_inputs_cache.set(
-                        _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                    )
-                    return selection_inputs
+                    return await maybe_cache(selection_inputs)
             if not accounts:
                 selection_inputs = _SelectionInputs(
                     accounts=[],
@@ -495,15 +500,42 @@ class LoadBalancer:
                     latest_secondary={},
                     runtime_accounts=[_clone_account(account) for account in all_accounts],
                 )
-                await self._selection_inputs_cache.set(
-                    _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-                )
-                return selection_inputs
+                return await maybe_cache(selection_inputs)
 
             latest_primary, latest_secondary = await asyncio.gather(
                 repos.usage.latest_by_account(),
                 repos.usage.latest_by_account(window="secondary"),
             )
+            states, _ = _build_states(
+                accounts=accounts,
+                latest_primary=latest_primary,
+                latest_secondary=latest_secondary,
+                runtime=self._runtime,
+            )
+            current_time = time.time()
+            otherwise_selectable_account_ids = _state_ids_requiring_timeframe_filter(states, now=current_time)
+            pre_timeframe_accounts = [
+                account for account in accounts if account.id in otherwise_selectable_account_ids
+            ]
+            timeframe_accounts, timeframe_error_code, timeframe_error_message = _filter_accounts_for_active_timeframes(
+                pre_timeframe_accounts
+            )
+            if pre_timeframe_accounts and not timeframe_accounts:
+                selection_inputs = _SelectionInputs(
+                    accounts=[],
+                    latest_primary={},
+                    latest_secondary={},
+                    runtime_accounts=[_clone_account(account) for account in all_accounts],
+                    error_message=timeframe_error_message,
+                    error_code=timeframe_error_code,
+                )
+                return await maybe_cache(selection_inputs)
+            timeframe_account_ids = {account.id for account in timeframe_accounts}
+            accounts = [
+                account
+                for account in accounts
+                if account.id not in otherwise_selectable_account_ids or account.id in timeframe_account_ids
+            ]
             selection_inputs = _SelectionInputs(
                 accounts=[_clone_account(account) for account in accounts],
                 latest_primary={
@@ -514,10 +546,7 @@ class LoadBalancer:
                 },
                 runtime_accounts=[_clone_account(account) for account in all_accounts],
             )
-            await self._selection_inputs_cache.set(
-                _clone_selection_inputs(selection_inputs), key=cache_key, generation=load_generation
-            )
-            return selection_inputs
+            return await maybe_cache(selection_inputs)
 
     async def _filter_accounts_for_additional_limit(
         self,
@@ -1295,6 +1324,95 @@ def _selectable_accounts(accounts: list[Account]) -> list[Account]:
         if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
         and _account_proxy_dependency_is_selectable(account)
     ]
+
+
+def _accounts_include_active_timeframe_assignments(accounts: list[Account]) -> bool:
+    return any(account.active_timeframe_id is not None for account in accounts)
+
+
+def _state_ids_requiring_timeframe_filter(states: list[AccountState], *, now: float) -> set[str]:
+    active_states = [
+        state
+        for state in states
+        if state.status == AccountStatus.ACTIVE
+        and not (state.cooldown_until is not None and state.cooldown_until > now)
+    ]
+    error_backoff_states = [state for state in active_states if _state_in_error_backoff(state, now=now)]
+    hard_blocked_exists = any(
+        state.status
+        in (
+            AccountStatus.PAUSED,
+            AccountStatus.DEACTIVATED,
+            AccountStatus.RATE_LIMITED,
+            AccountStatus.QUOTA_EXCEEDED,
+        )
+        for state in states
+    )
+    include_error_backoff = len(error_backoff_states) > 1 or (bool(error_backoff_states) and hard_blocked_exists)
+    return {
+        state.account_id
+        for state in active_states
+        if include_error_backoff or not _state_in_error_backoff(state, now=now)
+    }
+
+
+def _state_in_error_backoff(state: AccountState, *, now: float) -> bool:
+    if state.error_count < 3 or state.last_error_at is None:
+        return False
+    backoff = min(300, 30 * (2 ** (state.error_count - 3)))
+    return now - state.last_error_at < backoff
+
+
+def _filter_accounts_for_active_timeframes(accounts: list[Account]) -> tuple[list[Account], str | None, str | None]:
+    eligible_accounts: list[Account] = []
+    outside_count = 0
+    invalid_or_missing_count = 0
+    now = utcnow()
+
+    for account in accounts:
+        if account.active_timeframe_id is None:
+            eligible_accounts.append(account)
+            continue
+        timeframe = account.active_timeframe
+        if timeframe is None:
+            invalid_or_missing_count += 1
+            continue
+        mode = timeframe.mode.value if isinstance(timeframe.mode, AccountActiveTimeframeMode) else str(timeframe.mode)
+        decoded_weekdays = decode_timeframe_weekdays(timeframe.weekdays)
+        evaluation = evaluate_active_timeframe(
+            ActiveTimeframeDefinition(
+                id=timeframe.id,
+                timezone=timeframe.timezone,
+                start_minute=timeframe.start_minute,
+                end_minute=timeframe.end_minute,
+                mode=mode,
+                weekdays=decoded_weekdays.weekdays,
+                weekdays_valid=decoded_weekdays.valid,
+                random_days_per_week=timeframe.random_days_per_week,
+                random_seed=timeframe.random_seed,
+            ),
+            now=now,
+        )
+        if evaluation.availability == "active":
+            eligible_accounts.append(account)
+        elif evaluation.availability == "inactive":
+            outside_count += 1
+        else:
+            invalid_or_missing_count += 1
+
+    if eligible_accounts:
+        return eligible_accounts, None, None
+    if outside_count > 0 and invalid_or_missing_count == 0:
+        return (
+            [],
+            ACCOUNT_OUTSIDE_ACTIVE_TIMEFRAME,
+            "All otherwise eligible accounts are outside their active timeframes",
+        )
+    return (
+        [],
+        NO_ACTIVE_TIMEFRAME_ELIGIBLE_ACCOUNTS,
+        "No otherwise eligible accounts have an active timeframe available",
+    )
 
 
 def _account_proxy_dependency_is_selectable(account: Account) -> bool:

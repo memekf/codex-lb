@@ -9,6 +9,8 @@ from fastapi import Depends, FastAPI, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_background_session, get_session
+from app.modules.account_active_timeframes.repository import AccountActiveTimeframeRepository
+from app.modules.account_active_timeframes.service import AccountActiveTimeframeService
 from app.modules.account_proxies.repository import AccountProxyRepository
 from app.modules.account_proxies.service import AccountProxyService
 from app.modules.accounts.repository import AccountsRepository
@@ -53,6 +55,13 @@ class AccountProxiesContext:
     session: AsyncSession
     repository: AccountProxyRepository
     service: AccountProxyService
+
+
+@dataclass(slots=True)
+class AccountActiveTimeframesContext:
+    session: AsyncSession
+    repository: AccountActiveTimeframeRepository
+    service: AccountActiveTimeframeService
 
 
 @dataclass(slots=True)
@@ -137,12 +146,14 @@ def get_accounts_context(
     additional_usage_repository = AdditionalUsageRepository(session)
     limit_warmup_repository = LimitWarmupRepository(session)
     account_proxy_repository = AccountProxyRepository(session)
+    account_active_timeframe_repository = AccountActiveTimeframeRepository(session)
     service = AccountsService(
         repository,
         usage_repository,
         additional_usage_repository,
         limit_warmup_repository,
         account_proxy_repository,
+        account_active_timeframe_repository,
     )
     return AccountsContext(
         session=session,
@@ -157,6 +168,14 @@ def get_account_proxies_context(
     repository = AccountProxyRepository(session)
     service = AccountProxyService(repository)
     return AccountProxiesContext(session=session, repository=repository, service=service)
+
+
+def get_account_active_timeframes_context(
+    session: AsyncSession = Depends(get_session),
+) -> AccountActiveTimeframesContext:
+    repository = AccountActiveTimeframeRepository(session)
+    service = AccountActiveTimeframeService(repository)
+    return AccountActiveTimeframesContext(session=session, repository=repository, service=service)
 
 
 def get_audit_context(

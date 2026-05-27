@@ -8,9 +8,12 @@ import { AccountTokenInfo } from "@/features/accounts/components/account-token-i
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
+import type { AccountActiveTimeframe } from "@/features/active-timeframes/schemas";
+import { weekdayLabel } from "@/features/active-timeframes/utils";
 import type { AccountProxy } from "@/features/proxies/schemas";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
+import { formatDateTimeInline } from "@/utils/formatters";
 
 export type AccountDetailProps = {
   account: AccountSummary | null;
@@ -25,6 +28,8 @@ export type AccountDetailProps = {
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
   proxies?: AccountProxy[];
   onSetProxy?: (accountId: string, proxyId: string | null) => void;
+  timeframes?: AccountActiveTimeframe[];
+  onSetActiveTimeframe?: (accountId: string, activeTimeframeId: string | null) => void;
   onExportOpenCodeAuth: (accountId: string) => void;
 };
 
@@ -41,6 +46,8 @@ export function AccountDetail({
   onLimitWarmupChange,
   proxies = [],
   onSetProxy,
+  timeframes = [],
+  onSetActiveTimeframe,
   onExportOpenCodeAuth,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
@@ -81,7 +88,7 @@ export function AccountDetail({
       </div>
 
       <AccountAliasForm account={account} busy={busy} onSetAlias={onSetAlias} />
-      <div className="rounded-lg border bg-muted/10 p-3">
+      <div className="space-y-3 rounded-lg border bg-muted/10 p-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="min-w-0">
             <p className="text-sm font-medium">Proxy</p>
@@ -105,6 +112,42 @@ export function AccountDetail({
               {proxies.map((proxy) => (
                 <SelectItem key={proxy.id} value={proxy.id}>
                   {proxy.displayName} ({proxy.status})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="flex flex-col gap-3 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-sm font-medium">Active timeframe</p>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+              {account.activeTimeframeId
+                ? `${account.activeTimeframeDisplayName ?? account.activeTimeframeId} | ${account.activeTimeframeAvailability ?? "inactive"}`
+                : "Always active"}
+              {account.activeTimeframeWindow ? ` | ${account.activeTimeframeWindow}` : ""}
+              {account.activeTimeframeResolvedWeekdays?.length
+                ? ` | ${weekdayLabel(account.activeTimeframeResolvedWeekdays)}`
+                : ""}
+              {account.activeTimeframeNextChangeAt
+                ? ` | Next ${formatDateTimeInline(account.activeTimeframeNextChangeAt)}`
+                : ""}
+            </p>
+          </div>
+          <Select
+            value={account.activeTimeframeId ?? "__always__"}
+            disabled={busy || !onSetActiveTimeframe}
+            onValueChange={(value) =>
+              onSetActiveTimeframe?.(account.accountId, value === "__always__" ? null : value)
+            }
+          >
+            <SelectTrigger aria-label="Account active timeframe" className="w-full sm:w-64">
+              <SelectValue placeholder="Select timeframe" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__always__">Always active</SelectItem>
+              {timeframes.map((timeframe) => (
+                <SelectItem key={timeframe.id} value={timeframe.id}>
+                  {timeframe.displayName}
                 </SelectItem>
               ))}
             </SelectContent>

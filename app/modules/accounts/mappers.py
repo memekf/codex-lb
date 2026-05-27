@@ -9,7 +9,19 @@ from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
-from app.db.models import Account, AccountLimitWarmup, AccountProxyStatus, AccountStatus, UsageHistory
+from app.db.models import (
+    Account,
+    AccountActiveTimeframeMode,
+    AccountLimitWarmup,
+    AccountProxyStatus,
+    AccountStatus,
+    UsageHistory,
+)
+from app.modules.account_active_timeframes.schedule import (
+    ActiveTimeframeDefinition,
+    decode_timeframe_weekdays,
+    evaluate_active_timeframe,
+)
 from app.modules.account_proxies.validation import ProxyUrlValidationError, normalize_proxy_url, redact_proxy_url
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
@@ -121,6 +133,7 @@ def _account_to_summary(
         secondary_used_percent,
     )
     proxy_metadata = _build_proxy_metadata(account, encryptor)
+    active_timeframe_metadata = _build_active_timeframe_metadata(account)
     return AccountSummary(
         account_id=account.id,
         email=account.email,
@@ -155,6 +168,16 @@ def _account_to_summary(
         proxy_availability_reason=proxy_metadata.proxy_availability_reason,
         proxy_last_tested_at=proxy_metadata.proxy_last_tested_at,
         proxy_last_test_error=proxy_metadata.proxy_last_test_error,
+        active_timeframe_id=active_timeframe_metadata.active_timeframe_id,
+        active_timeframe_display_name=active_timeframe_metadata.active_timeframe_display_name,
+        active_timeframe_mode=active_timeframe_metadata.active_timeframe_mode,
+        active_timeframe_timezone=active_timeframe_metadata.active_timeframe_timezone,
+        active_timeframe_window=active_timeframe_metadata.active_timeframe_window,
+        active_timeframe_weekdays=active_timeframe_metadata.active_timeframe_weekdays,
+        active_timeframe_resolved_weekdays=active_timeframe_metadata.active_timeframe_resolved_weekdays,
+        active_timeframe_availability=active_timeframe_metadata.active_timeframe_availability,
+        active_timeframe_availability_reason=active_timeframe_metadata.active_timeframe_availability_reason,
+        active_timeframe_next_change_at=active_timeframe_metadata.active_timeframe_next_change_at,
     )
 
 
@@ -262,6 +285,79 @@ def _proxy_metadata(
 
 def _proxy_status_value(status: AccountProxyStatus | str) -> str:
     return status.value if isinstance(status, AccountProxyStatus) else str(status)
+
+
+class _ActiveTimeframeMetadata:
+    def __init__(
+        self,
+        *,
+        active_timeframe_id: str | None,
+        active_timeframe_display_name: str | None = None,
+        active_timeframe_mode: str | None = None,
+        active_timeframe_timezone: str | None = None,
+        active_timeframe_window: str | None = None,
+        active_timeframe_weekdays: list[int] | None = None,
+        active_timeframe_resolved_weekdays: list[int] | None = None,
+        active_timeframe_availability: str = "always",
+        active_timeframe_availability_reason: str = "none",
+        active_timeframe_next_change_at: datetime | None = None,
+    ) -> None:
+        self.active_timeframe_id = active_timeframe_id
+        self.active_timeframe_display_name = active_timeframe_display_name
+        self.active_timeframe_mode = active_timeframe_mode
+        self.active_timeframe_timezone = active_timeframe_timezone
+        self.active_timeframe_window = active_timeframe_window
+        self.active_timeframe_weekdays = active_timeframe_weekdays or []
+        self.active_timeframe_resolved_weekdays = active_timeframe_resolved_weekdays or []
+        self.active_timeframe_availability = active_timeframe_availability
+        self.active_timeframe_availability_reason = active_timeframe_availability_reason
+        self.active_timeframe_next_change_at = active_timeframe_next_change_at
+
+
+def _build_active_timeframe_metadata(account: Account) -> _ActiveTimeframeMetadata:
+    if account.active_timeframe_id is None:
+        return _ActiveTimeframeMetadata(active_timeframe_id=None)
+    timeframe = account.active_timeframe
+    if timeframe is None:
+        return _ActiveTimeframeMetadata(
+            active_timeframe_id=account.active_timeframe_id,
+            active_timeframe_availability="missing",
+            active_timeframe_availability_reason="timeframe_missing",
+        )
+
+    mode = timeframe.mode.value if isinstance(timeframe.mode, AccountActiveTimeframeMode) else str(timeframe.mode)
+    decoded_weekdays = decode_timeframe_weekdays(timeframe.weekdays)
+    evaluation = evaluate_active_timeframe(
+        ActiveTimeframeDefinition(
+            id=timeframe.id,
+            timezone=timeframe.timezone,
+            start_minute=timeframe.start_minute,
+            end_minute=timeframe.end_minute,
+            mode=mode,
+            weekdays=decoded_weekdays.weekdays,
+            weekdays_valid=decoded_weekdays.valid,
+            random_days_per_week=timeframe.random_days_per_week,
+            random_seed=timeframe.random_seed,
+        ),
+        now=datetime.now(timezone.utc),
+    )
+    return _ActiveTimeframeMetadata(
+        active_timeframe_id=timeframe.id,
+        active_timeframe_display_name=timeframe.display_name,
+        active_timeframe_mode=mode,
+        active_timeframe_timezone=timeframe.timezone,
+        active_timeframe_window=f"{_format_minute(timeframe.start_minute)}-{_format_minute(timeframe.end_minute)}",
+        active_timeframe_weekdays=decoded_weekdays.weekdays,
+        active_timeframe_resolved_weekdays=evaluation.current_weekdays,
+        active_timeframe_availability=evaluation.availability,
+        active_timeframe_availability_reason=evaluation.reason,
+        active_timeframe_next_change_at=evaluation.next_change_at,
+    )
+
+
+def _format_minute(value: int) -> str:
+    hour, minute = divmod(value, 60)
+    return f"{hour:02d}:{minute:02d}"
 
 
 def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWarmupStatus | None:

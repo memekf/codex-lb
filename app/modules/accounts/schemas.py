@@ -99,6 +99,16 @@ class AccountSummary(DashboardModel):
     proxy_availability_reason: str = "none"
     proxy_last_tested_at: datetime | None = None
     proxy_last_test_error: str | None = None
+    active_timeframe_id: str | None = None
+    active_timeframe_display_name: str | None = None
+    active_timeframe_mode: str | None = None
+    active_timeframe_timezone: str | None = None
+    active_timeframe_window: str | None = None
+    active_timeframe_weekdays: list[int] = Field(default_factory=list)
+    active_timeframe_resolved_weekdays: list[int] = Field(default_factory=list)
+    active_timeframe_availability: Literal["always", "active", "inactive", "missing", "invalid"] = "always"
+    active_timeframe_availability_reason: str = "none"
+    active_timeframe_next_change_at: datetime | None = None
 
 
 class AccountsResponse(DashboardModel):
@@ -188,3 +198,12 @@ class AccountProxyAssignmentRequest(DashboardModel):
 class AccountProxyAssignmentResponse(DashboardModel):
     status: str
     proxy_id: str | None = None
+
+
+class AccountActiveTimeframeAssignmentRequest(DashboardModel):
+    active_timeframe_id: str | None = None
+
+
+class AccountActiveTimeframeAssignmentResponse(DashboardModel):
+    status: str
+    active_timeframe_id: str | None = None

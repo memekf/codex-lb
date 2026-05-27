@@ -12,6 +12,7 @@ import { AccountsSkeleton } from "@/features/accounts/components/accounts-skelet
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { OpenCodeAuthExportDialog } from "@/features/accounts/components/opencode-auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
+import { useActiveTimeframes } from "@/features/active-timeframes/hooks/use-active-timeframes";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useProxies } from "@/features/proxies/hooks/use-proxies";
@@ -38,10 +39,12 @@ export function AccountsPage() {
     exportMutation,
     limitWarmupMutation,
     setProxyMutation,
+    setActiveTimeframeMutation,
     exportOpenCodeAuthMutation,
   } = useAccounts();
   const oauth = useOauth();
   const { proxiesQuery } = useProxies();
+  const { timeframesQuery } = useActiveTimeframes();
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
@@ -105,6 +108,7 @@ export function AccountsPage() {
     exportMutation.isPending ||
     limitWarmupMutation.isPending ||
     setProxyMutation.isPending ||
+    setActiveTimeframeMutation.isPending ||
     exportOpenCodeAuthMutation.isPending;
 
   const mutationError =
@@ -116,6 +120,7 @@ export function AccountsPage() {
     getErrorMessageOrNull(exportMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
     getErrorMessageOrNull(setProxyMutation.error) ||
+    getErrorMessageOrNull(setActiveTimeframeMutation.error) ||
     getErrorMessageOrNull(exportOpenCodeAuthMutation.error);
 
   return (
@@ -173,6 +178,10 @@ export function AccountsPage() {
             }
             proxies={proxiesQuery.data ?? []}
             onSetProxy={(accountId, proxyId) => void setProxyMutation.mutateAsync({ accountId, proxyId })}
+            timeframes={timeframesQuery.data ?? []}
+            onSetActiveTimeframe={(accountId, activeTimeframeId) =>
+              void setActiveTimeframeMutation.mutateAsync({ accountId, activeTimeframeId })
+            }
           />
         </div>
       )}

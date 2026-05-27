@@ -43,7 +43,11 @@ class AccountsRepository:
         return await self._session.get(Account, account_id)
 
     async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
-        stmt = select(Account).options(selectinload(Account.proxy)).order_by(Account.email)
+        stmt = (
+            select(Account)
+            .options(selectinload(Account.proxy), selectinload(Account.active_timeframe))
+            .order_by(Account.email)
+        )
         if refresh_existing:
             stmt = stmt.execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
@@ -228,6 +232,16 @@ class AccountsRepository:
     async def update_proxy_id(self, account_id: str, proxy_id: str | None) -> bool:
         result = await self._session.execute(
             update(Account).where(Account.id == account_id).values(proxy_id=proxy_id).returning(Account.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def update_active_timeframe_id(self, account_id: str, active_timeframe_id: str | None) -> bool:
+        result = await self._session.execute(
+            update(Account)
+            .where(Account.id == account_id)
+            .values(active_timeframe_id=active_timeframe_id)
+            .returning(Account.id)
         )
         await self._session.commit()
         return result.scalar_one_or_none() is not None

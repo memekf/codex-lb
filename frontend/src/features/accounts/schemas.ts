@@ -87,6 +87,16 @@ export const AccountSummarySchema = z.object({
   proxyAvailabilityReason: z.string().optional(),
   proxyLastTestedAt: z.string().datetime({ offset: true }).nullable().optional(),
   proxyLastTestError: z.string().nullable().optional(),
+  activeTimeframeId: z.string().nullable().optional(),
+  activeTimeframeDisplayName: z.string().nullable().optional(),
+  activeTimeframeMode: z.string().nullable().optional(),
+  activeTimeframeTimezone: z.string().nullable().optional(),
+  activeTimeframeWindow: z.string().nullable().optional(),
+  activeTimeframeWeekdays: z.array(z.number().int()).optional(),
+  activeTimeframeResolvedWeekdays: z.array(z.number().int()).optional(),
+  activeTimeframeAvailability: z.enum(["always", "active", "inactive", "missing", "invalid"]).or(z.string()).optional(),
+  activeTimeframeAvailabilityReason: z.string().optional(),
+  activeTimeframeNextChangeAt: z.string().datetime({ offset: true }).nullable().optional(),
 });
 
 export const AccountTrendsResponseSchema = z.object({
@@ -160,6 +170,15 @@ export const AccountProxyAssignmentRequestSchema = z.object({
 export const AccountProxyAssignmentResponseSchema = z.object({
   status: z.string(),
   proxyId: z.string().nullable(),
+});
+
+export const AccountActiveTimeframeAssignmentRequestSchema = z.object({
+  activeTimeframeId: z.string().nullable(),
+});
+
+export const AccountActiveTimeframeAssignmentResponseSchema = z.object({
+  status: z.string(),
+  activeTimeframeId: z.string().nullable(),
 });
 
 export const AccountExportResponseSchema = z.object({

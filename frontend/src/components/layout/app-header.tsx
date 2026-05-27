@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { to: "/dashboard", label: "Dashboard" },
   { to: "/accounts", label: "Accounts" },
   { to: "/proxies", label: "Proxies" },
+  { to: "/timeframes", label: "Timeframes" },
   { to: "/apis", label: "APIs" },
   { to: "/settings", label: "Settings" },
 ] as const;

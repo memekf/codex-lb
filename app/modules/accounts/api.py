@@ -8,6 +8,8 @@ from app.core.exceptions import DashboardBadRequestError, DashboardConflictError
 from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
+    AccountActiveTimeframeAssignmentRequest,
+    AccountActiveTimeframeAssignmentResponse,
     AccountAliasRequest,
     AccountAliasResponse,
     AccountDeleteResponse,
@@ -23,7 +25,12 @@ from app.modules.accounts.schemas import (
     AccountsResponse,
     AccountTrendsResponse,
 )
-from app.modules.accounts.service import AccountNotFoundError, AccountProxyNotFoundError, InvalidAuthJsonError
+from app.modules.accounts.service import (
+    AccountActiveTimeframeNotFoundError,
+    AccountNotFoundError,
+    AccountProxyNotFoundError,
+    InvalidAuthJsonError,
+)
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -55,6 +62,24 @@ async def set_account_proxy(
         raise DashboardNotFoundError("Proxy not found", code="proxy_not_found") from exc
     await get_proxy_service_for_app(request.app).close_http_bridge_sessions_for_account(account_id)
     return AccountProxyAssignmentResponse(status="updated", proxy_id=proxy_id)
+
+
+@router.put("/{account_id}/active-timeframe", response_model=AccountActiveTimeframeAssignmentResponse)
+async def set_account_active_timeframe(
+    account_id: str,
+    payload: AccountActiveTimeframeAssignmentRequest,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountActiveTimeframeAssignmentResponse:
+    try:
+        active_timeframe_id = await context.service.set_account_active_timeframe(
+            account_id,
+            payload.active_timeframe_id,
+        )
+    except AccountNotFoundError as exc:
+        raise DashboardNotFoundError("Account not found", code="account_not_found") from exc
+    except AccountActiveTimeframeNotFoundError as exc:
+        raise DashboardNotFoundError("Active timeframe not found", code="active_timeframe_not_found") from exc
+    return AccountActiveTimeframeAssignmentResponse(status="updated", active_timeframe_id=active_timeframe_id)
 
 
 @router.get("/{account_id}/trends", response_model=AccountTrendsResponse)

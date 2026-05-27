@@ -86,6 +86,42 @@ class AccountProxy(Base):
     accounts: Mapped[list["Account"]] = relationship("Account", back_populates="proxy")
 
 
+class AccountActiveTimeframeMode(str, Enum):
+    FIXED_WEEKDAYS = "fixed_weekdays"
+    RANDOM_WEEKLY_DAYS = "random_weekly_days"
+
+
+class AccountActiveTimeframe(Base):
+    __tablename__ = "account_active_timeframes"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    timezone: Mapped[str] = mapped_column(String, nullable=False)
+    start_minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_minute: Mapped[int] = mapped_column(Integer, nullable=False)
+    mode: Mapped[AccountActiveTimeframeMode] = mapped_column(
+        SqlEnum(
+            AccountActiveTimeframeMode,
+            name="account_active_timeframe_mode",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        nullable=False,
+    )
+    weekdays: Mapped[str | None] = mapped_column(Text, nullable=True)
+    random_days_per_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    random_seed: Mapped[str] = mapped_column(String, nullable=False, default=lambda: str(uuid.uuid4()))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    accounts: Mapped[list["Account"]] = relationship("Account", back_populates="active_timeframe")
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -120,6 +156,11 @@ class Account(Base):
         ForeignKey("account_proxies.id", ondelete="RESTRICT"),
         nullable=True,
     )
+    active_timeframe_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("account_active_timeframes.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     limit_warmup_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -142,6 +183,10 @@ class Account(Base):
         cascade="all, delete-orphan",
     )
     proxy: Mapped[AccountProxy | None] = relationship("AccountProxy", back_populates="accounts")
+    active_timeframe: Mapped[AccountActiveTimeframe | None] = relationship(
+        "AccountActiveTimeframe",
+        back_populates="accounts",
+    )
 
 
 class UsageHistory(Base):
@@ -758,6 +803,8 @@ Index(
 )
 Index("idx_account_proxies_status", AccountProxy.status)
 Index("idx_accounts_proxy_id", Account.proxy_id)
+Index("idx_account_active_timeframes_mode", AccountActiveTimeframe.mode)
+Index("idx_accounts_active_timeframe_id", Account.active_timeframe_id)
 Index(
     "idx_usage_window_raw_account_latest",
     UsageHistory.window,

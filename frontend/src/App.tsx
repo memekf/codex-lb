@@ -4,6 +4,7 @@ import { AppHeader } from "@/components/layout/app-header";
 import { StatusBar } from "@/components/layout/status-bar";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ActiveTimeframesPage } from "@/features/active-timeframes/components/active-timeframes-page";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/accounts" element={<AccountsPage />} />
             <Route path="/proxies" element={<ProxiesPage />} />
+            <Route path="/timeframes" element={<ActiveTimeframesPage />} />
             <Route path="/apis" element={<ApisPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/firewall" element={<Navigate to="/settings" replace />} />

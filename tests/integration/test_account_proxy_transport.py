@@ -15,7 +15,14 @@ import app.modules.proxy.service as proxy_module
 from app.core.clients import account_proxy
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountProxy, AccountProxyStatus, AccountStatus
+from app.db.models import (
+    Account,
+    AccountActiveTimeframe,
+    AccountActiveTimeframeMode,
+    AccountProxy,
+    AccountProxyStatus,
+    AccountStatus,
+)
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 
@@ -264,7 +271,102 @@ async def test_account_proxy_transport_rejects_unusable_assignment_without_reque
     assert fake_session.calls == []
 
 
-def _account(account_id: str, *, proxy_id: str | None) -> Account:
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["outside", "invalid", "missing"])
+async def test_account_proxy_transport_rejects_unavailable_active_timeframe_without_request(db_setup, kind):
+    del db_setup
+    account_id = f"{kind}-active-timeframe-account"
+    timeframe_id = f"{kind}-active-timeframe"
+    async with SessionLocal() as session:
+        if kind == "missing":
+            await session.execute(text("PRAGMA foreign_keys=OFF"))
+        else:
+            tomorrow = (utcnow().weekday() + 1) % 7
+            session.add(
+                AccountActiveTimeframe(
+                    id=timeframe_id,
+                    display_name=kind,
+                    timezone="Not/AZone" if kind == "invalid" else "UTC",
+                    start_minute=0,
+                    end_minute=0,
+                    mode=AccountActiveTimeframeMode.FIXED_WEEKDAYS,
+                    weekdays=json.dumps([tomorrow]),
+                    random_seed=f"seed-{kind}",
+                )
+            )
+        session.add(_account(account_id, proxy_id=None, active_timeframe_id=timeframe_id))
+        await session.commit()
+        if kind == "missing":
+            await session.execute(text("PRAGMA foreign_keys=ON"))
+
+    fake_session = _FakeSession()
+
+    with pytest.raises(account_proxy.AccountProxyTransportError) as exc_info:
+        async with account_proxy.get(account_id, "https://upstream.example.test/models", session=fake_session):
+            pass
+
+    assert exc_info.value.code == "account_outside_active_timeframe"
+    assert fake_session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_account_proxy_transport_rejects_malformed_active_timeframe_weekdays_without_request(db_setup):
+    del db_setup
+    account_id = "malformed-active-timeframe-account"
+    timeframe_id = "malformed-active-timeframe"
+    async with SessionLocal() as session:
+        session.add(
+            AccountActiveTimeframe(
+                id=timeframe_id,
+                display_name="malformed",
+                timezone="UTC",
+                start_minute=0,
+                end_minute=0,
+                mode=AccountActiveTimeframeMode.FIXED_WEEKDAYS,
+                weekdays="{not-json",
+                random_seed="seed-malformed",
+            )
+        )
+        session.add(_account(account_id, proxy_id=None, active_timeframe_id=timeframe_id))
+        await session.commit()
+
+    fake_session = _FakeSession()
+
+    with pytest.raises(account_proxy.AccountProxyTransportError) as exc_info:
+        async with account_proxy.get(account_id, "https://upstream.example.test/models", session=fake_session):
+            pass
+
+    assert exc_info.value.code == "account_outside_active_timeframe"
+    assert fake_session.calls == []
+
+
+@pytest.mark.asyncio
+async def test_transport_fingerprint_resolution_keeps_existing_sessions_soft_across_timeframe_boundary(db_setup):
+    del db_setup
+    account_id = "soft-existing-timeframe-account"
+    tomorrow = (utcnow().weekday() + 1) % 7
+    async with SessionLocal() as session:
+        session.add(
+            AccountActiveTimeframe(
+                id="soft-existing-timeframe",
+                display_name="Outside",
+                timezone="UTC",
+                start_minute=0,
+                end_minute=0,
+                mode=AccountActiveTimeframeMode.FIXED_WEEKDAYS,
+                weekdays=json.dumps([tomorrow]),
+                random_seed="seed-soft",
+            )
+        )
+        session.add(_account(account_id, proxy_id=None, active_timeframe_id="soft-existing-timeframe"))
+        await session.commit()
+
+    fingerprint = await proxy_module._resolve_account_transport_fingerprint(account_id)
+
+    assert fingerprint == "none"
+
+
+def _account(account_id: str, *, proxy_id: str | None, active_timeframe_id: str | None = None) -> Account:
     now = utcnow()
     encryptor = TokenEncryptor()
     return Account(
@@ -278,6 +380,7 @@ def _account(account_id: str, *, proxy_id: str | None) -> Account:
         last_refresh=now,
         status=AccountStatus.ACTIVE,
         proxy_id=proxy_id,
+        active_timeframe_id=active_timeframe_id,
     )
 
 

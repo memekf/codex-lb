@@ -16,8 +16,14 @@ from websockets.asyncio.client import connect as websockets_connect_impl
 
 from app.core.clients.http import lease_http_client, lease_http_session, lease_retry_client
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountProxyStatus, AccountStatus
+from app.core.utils.time import utcnow
+from app.db.models import Account, AccountActiveTimeframeMode, AccountProxyStatus, AccountStatus
 from app.db.session import SessionLocal
+from app.modules.account_active_timeframes.schedule import (
+    ActiveTimeframeDefinition,
+    decode_timeframe_weekdays,
+    evaluate_active_timeframe,
+)
 from app.modules.account_proxies.validation import ProxyUrlValidationError, normalize_proxy_url, redact_proxy_url
 
 
@@ -34,10 +40,12 @@ class AccountProxyTransportError(Exception):
         self.message = message
 
 
-async def resolve_transport(account_id: str) -> AccountProxyTransport:
+async def resolve_transport(account_id: str, *, enforce_active_timeframe: bool = True) -> AccountProxyTransport:
     async with SessionLocal() as session:
         result = await session.execute(
-            select(Account).options(selectinload(Account.proxy)).where(Account.id == account_id)
+            select(Account)
+            .options(selectinload(Account.proxy), selectinload(Account.active_timeframe))
+            .where(Account.id == account_id)
         )
         account = result.scalar_one_or_none()
         if account is None:
@@ -46,6 +54,8 @@ async def resolve_transport(account_id: str) -> AccountProxyTransport:
             raise AccountProxyTransportError("account_paused", "Account is paused")
         if account.status == AccountStatus.DEACTIVATED:
             raise AccountProxyTransportError("account_deactivated", "Account is deactivated")
+        if enforce_active_timeframe:
+            _raise_if_active_timeframe_unavailable(account)
         if account.proxy_id is None:
             return AccountProxyTransport(proxy_url=None, proxy_fingerprint="none")
 
@@ -170,6 +180,39 @@ def _apply_proxy(kwargs: dict[str, Any], proxy_url: str | None) -> dict[str, Any
 def _proxy_fingerprint(proxy_id: str, proxy_url: str) -> str:
     digest = hashlib.sha256(proxy_url.encode("utf-8")).hexdigest()[:16]
     return f"proxy:{proxy_id}:{digest}"
+
+
+def _raise_if_active_timeframe_unavailable(account: Account) -> None:
+    if account.active_timeframe_id is None:
+        return
+    timeframe = account.active_timeframe
+    if timeframe is None:
+        raise AccountProxyTransportError(
+            "account_outside_active_timeframe",
+            "Account active timeframe is missing",
+        )
+    mode = timeframe.mode.value if isinstance(timeframe.mode, AccountActiveTimeframeMode) else str(timeframe.mode)
+    decoded_weekdays = decode_timeframe_weekdays(timeframe.weekdays)
+    evaluation = evaluate_active_timeframe(
+        ActiveTimeframeDefinition(
+            id=timeframe.id,
+            timezone=timeframe.timezone,
+            start_minute=timeframe.start_minute,
+            end_minute=timeframe.end_minute,
+            mode=mode,
+            weekdays=decoded_weekdays.weekdays,
+            weekdays_valid=decoded_weekdays.valid,
+            random_days_per_week=timeframe.random_days_per_week,
+            random_seed=timeframe.random_seed,
+        ),
+        now=utcnow(),
+    )
+    if evaluation.availability == "active":
+        return
+    raise AccountProxyTransportError(
+        "account_outside_active_timeframe",
+        "Account is outside its active timeframe",
+    )
 
 
 def redact_transport_error(error: AccountProxyTransportError) -> str:

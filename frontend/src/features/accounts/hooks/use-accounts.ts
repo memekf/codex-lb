@@ -11,6 +11,7 @@ import {
   pauseAccount,
   reactivateAccount,
   setAccountAlias,
+  setAccountActiveTimeframe,
   setAccountProxy,
   updateAccountLimitWarmup,
 } from "@/features/accounts/api";
@@ -129,6 +130,19 @@ export function useAccountMutations() {
     },
   });
 
+  const setActiveTimeframeMutation = useMutation({
+    mutationFn: ({ accountId, activeTimeframeId }: { accountId: string; activeTimeframeId: string | null }) =>
+      setAccountActiveTimeframe(accountId, activeTimeframeId),
+    onSuccess: () => {
+      toast.success("Account timeframe updated");
+      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["active-timeframes", "list"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Timeframe update failed");
+    },
+  });
+
   const exportOpenCodeAuthMutation = useMutation({
     mutationFn: exportAccountOpenCodeAuth,
     onSuccess: () => {
@@ -148,6 +162,7 @@ export function useAccountMutations() {
     exportMutation,
     limitWarmupMutation,
     setProxyMutation,
+    setActiveTimeframeMutation,
     exportOpenCodeAuthMutation,
   };
 }

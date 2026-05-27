@@ -77,3 +77,39 @@ def test_account_bound_raw_outbound_primitives_remain_explicitly_allowlisted() -
         discovered.update(visitor.calls)
 
     assert discovered == _ALLOWED_RAW_CALLS
+
+
+def test_active_timeframe_transport_enforcement_opt_outs_remain_explicitly_allowlisted() -> None:
+    allowed_false_calls = {
+        ("app/modules/proxy/service.py", "_resolve_account_transport_fingerprint"),
+    }
+    discovered_false_calls: set[tuple[str, str]] = set()
+    scanned_modules = [
+        *_PROJECT_ROOT.glob("app/core/clients/*.py"),
+        _PROJECT_ROOT / "app/modules/proxy/service.py",
+    ]
+
+    for module in scanned_modules:
+        relative_path = module.relative_to(_PROJECT_ROOT).as_posix()
+        tree = ast.parse(module.read_text(encoding="utf-8"), filename=str(module))
+        function_stack: list[str] = []
+
+        class Visitor(ast.NodeVisitor):
+            def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+                function_stack.append(node.name)
+                self.generic_visit(node)
+                function_stack.pop()
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+            def visit_Call(self, node: ast.Call) -> None:
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "resolve_transport":
+                    for keyword in node.keywords:
+                        if keyword.arg == "enforce_active_timeframe" and isinstance(keyword.value, ast.Constant):
+                            if keyword.value.value is False:
+                                discovered_false_calls.add((relative_path, function_stack[-1]))
+                self.generic_visit(node)
+
+        Visitor().visit(tree)
+
+    assert discovered_false_calls == allowed_false_calls

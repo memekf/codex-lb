@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta, timezone
@@ -9,11 +11,20 @@ import pytest
 from app.core.balancer import HEALTH_TIER_DRAINING
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountProxy, AccountProxyStatus, AccountStatus
+from app.db.models import (
+    Account,
+    AccountActiveTimeframe,
+    AccountActiveTimeframeMode,
+    AccountProxy,
+    AccountProxyStatus,
+    AccountStatus,
+)
 from app.db.session import SessionLocal
+from app.modules.account_active_timeframes.schedule import ActiveTimeframeDefinition, resolve_current_weekdays
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
-from app.modules.proxy.load_balancer import LoadBalancer
+from app.modules.proxy.account_cache import get_account_selection_cache
+from app.modules.proxy.load_balancer import LoadBalancer, RuntimeState
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.sticky_repository import StickySessionsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
@@ -33,6 +44,339 @@ async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
             api_keys=ApiKeysRepository(session),
             additional_usage=AdditionalUsageRepository(session),
         )
+
+
+def _account(
+    account_id: str,
+    *,
+    active_timeframe_id: str | None = None,
+    status: AccountStatus = AccountStatus.ACTIVE,
+) -> Account:
+    encryptor = TokenEncryptor()
+    return Account(
+        id=account_id,
+        email=f"{account_id}@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt(f"access-{account_id}"),
+        refresh_token_encrypted=encryptor.encrypt(f"refresh-{account_id}"),
+        id_token_encrypted=encryptor.encrypt(f"id-{account_id}"),
+        last_refresh=utcnow(),
+        status=status,
+        deactivation_reason=None,
+        active_timeframe_id=active_timeframe_id,
+    )
+
+
+def _timeframe(
+    timeframe_id: str,
+    *,
+    weekdays: list[int],
+    start_minute: int = 0,
+    end_minute: int = 0,
+    timezone_name: str = "UTC",
+) -> AccountActiveTimeframe:
+    return AccountActiveTimeframe(
+        id=timeframe_id,
+        display_name=timeframe_id,
+        timezone=timezone_name,
+        start_minute=start_minute,
+        end_minute=end_minute,
+        mode=AccountActiveTimeframeMode.FIXED_WEEKDAYS,
+        weekdays=json.dumps(weekdays),
+        random_seed=f"seed-{timeframe_id}",
+    )
+
+
+def _malformed_timeframe(timeframe_id: str) -> AccountActiveTimeframe:
+    return AccountActiveTimeframe(
+        id=timeframe_id,
+        display_name=timeframe_id,
+        timezone="UTC",
+        start_minute=0,
+        end_minute=0,
+        mode=AccountActiveTimeframeMode.FIXED_WEEKDAYS,
+        weekdays="{not-json",
+        random_seed=f"seed-{timeframe_id}",
+    )
+
+
+def _random_timeframe(timeframe_id: str, *, random_seed: str) -> AccountActiveTimeframe:
+    return AccountActiveTimeframe(
+        id=timeframe_id,
+        display_name=timeframe_id,
+        timezone="UTC",
+        start_minute=0,
+        end_minute=0,
+        mode=AccountActiveTimeframeMode.RANDOM_WEEKLY_DAYS,
+        weekdays=None,
+        random_days_per_week=1,
+        random_seed=random_seed,
+    )
+
+
+def _random_seed_for_current_weekday(timeframe_id: str, *, include_current: bool) -> str:
+    current_weekday = utcnow().weekday()
+    for index in range(128):
+        seed = f"seed-{index}"
+        definition = ActiveTimeframeDefinition(
+            id=timeframe_id,
+            timezone="UTC",
+            start_minute=0,
+            end_minute=0,
+            mode="random_weekly_days",
+            weekdays=[],
+            random_days_per_week=1,
+            random_seed=seed,
+        )
+        includes = current_weekday in resolve_current_weekdays(definition, now=utcnow())
+        if includes == include_current:
+            return seed
+    raise AssertionError("could not find deterministic random seed")
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_skips_accounts_outside_active_timeframes(db_setup):
+    today = utcnow().weekday()
+    tomorrow = (today + 1) % 7
+    inside = _timeframe("tf_inside_today", weekdays=[today])
+    outside = _timeframe("tf_outside_today", weekdays=[tomorrow])
+    inside_account = _account("acc_timeframe_inside", active_timeframe_id=inside.id)
+    outside_account = _account("acc_timeframe_outside", active_timeframe_id=outside.id)
+
+    async with SessionLocal() as session:
+        session.add_all([inside, outside, outside_account, inside_account])
+        await session.commit()
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account()
+
+    assert selection.account is not None
+    assert selection.account.id == inside_account.id
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_returns_active_timeframe_error_when_all_candidates_are_outside(db_setup):
+    tomorrow = (utcnow().weekday() + 1) % 7
+    timeframe = _timeframe("tf_all_outside", weekdays=[tomorrow])
+    account = _account("acc_all_outside", active_timeframe_id=timeframe.id)
+
+    async with SessionLocal() as session:
+        session.add_all([timeframe, account])
+        await session.commit()
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account()
+
+    assert selection.account is None
+    assert selection.error_code == "account_outside_active_timeframe"
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_quota_exhausted_outside_timeframe_keeps_quota_as_primary_reason(db_setup):
+    del db_setup
+    tomorrow = (utcnow().weekday() + 1) % 7
+    timeframe = _timeframe("tf_quota_outside", weekdays=[tomorrow])
+    account = _account("acc_quota_outside", active_timeframe_id=timeframe.id)
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        session.add(timeframe)
+        await session.commit()
+        await accounts_repo.upsert(account)
+        await usage_repo.add_entry(
+            account_id=account.id,
+            used_percent=100.0,
+            window="secondary",
+            reset_at=now_epoch + 7200,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account()
+
+    assert selection.account is None
+    assert selection.error_code != "account_outside_active_timeframe"
+    async with SessionLocal() as session:
+        refreshed = await session.get(Account, account.id)
+        assert refreshed is not None
+        assert refreshed.status == AccountStatus.QUOTA_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_quota_exhausted_invalid_timeframe_is_not_counted_as_timeframe_failure(db_setup):
+    del db_setup
+    tomorrow = (utcnow().weekday() + 1) % 7
+    outside_timeframe = _timeframe("tf_selectable_outside", weekdays=[tomorrow])
+    invalid_timeframe = _malformed_timeframe("tf_quota_malformed")
+    outside_account = _account("acc_selectable_outside", active_timeframe_id=outside_timeframe.id)
+    quota_account = _account("acc_quota_malformed", active_timeframe_id=invalid_timeframe.id)
+    now = utcnow()
+    now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
+
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        usage_repo = UsageRepository(session)
+        session.add_all([outside_timeframe, invalid_timeframe])
+        await session.commit()
+        await accounts_repo.upsert(outside_account)
+        await accounts_repo.upsert(quota_account)
+        await usage_repo.add_entry(
+            account_id=quota_account.id,
+            used_percent=100.0,
+            window="secondary",
+            reset_at=now_epoch + 7200,
+            window_minutes=10080,
+            recorded_at=now,
+        )
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account()
+
+    assert selection.account is None
+    assert selection.error_code == "account_outside_active_timeframe"
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_cooldown_account_outside_timeframe_keeps_cooldown_as_primary_reason(db_setup):
+    del db_setup
+    tomorrow = (utcnow().weekday() + 1) % 7
+    timeframe = _timeframe("tf_cooldown_outside", weekdays=[tomorrow])
+    account = _account("acc_cooldown_outside", active_timeframe_id=timeframe.id)
+
+    async with SessionLocal() as session:
+        session.add_all([timeframe, account])
+        await session.commit()
+
+    balancer = LoadBalancer(_repo_factory)
+    balancer._runtime[account.id] = RuntimeState(cooldown_until=time.time() + 300.0)
+    selection = await balancer.select_account()
+
+    assert selection.account is None
+    assert selection.error_code is None
+    assert selection.error_message is not None
+    assert "Try again in" in selection.error_message
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_error_backoff_fallback_accounts_outside_timeframe_return_timeframe_error(db_setup):
+    del db_setup
+    tomorrow = (utcnow().weekday() + 1) % 7
+    timeframe = _timeframe("tf_backoff_outside", weekdays=[tomorrow])
+    account_a = _account("acc_backoff_outside_a", active_timeframe_id=timeframe.id)
+    account_b = _account("acc_backoff_outside_b", active_timeframe_id=timeframe.id)
+
+    async with SessionLocal() as session:
+        session.add_all([timeframe, account_a, account_b])
+        await session.commit()
+
+    balancer = LoadBalancer(_repo_factory)
+    now = time.time()
+    balancer._runtime[account_a.id] = RuntimeState(error_count=3, last_error_at=now)
+    balancer._runtime[account_b.id] = RuntimeState(error_count=3, last_error_at=now)
+
+    selection = await balancer.select_account()
+
+    assert selection.account is None
+    assert selection.error_code == "account_outside_active_timeframe"
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_malformed_timeframe_weekdays_fail_closed_with_timeframe_error(db_setup):
+    del db_setup
+    timeframe = _malformed_timeframe("tf_malformed_selection")
+    account = _account("acc_malformed_selection", active_timeframe_id=timeframe.id)
+
+    async with SessionLocal() as session:
+        session.add_all([timeframe, account])
+        await session.commit()
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account()
+
+    assert selection.account is None
+    assert selection.error_code == "no_active_timeframe_eligible_accounts"
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_does_not_check_timeframe_for_inactive_core_status_accounts(db_setup):
+    invalid_timeframe = _timeframe("tf_invalid_paused", weekdays=[utcnow().weekday()], timezone_name="Not/AZone")
+    paused_account = _account(
+        "acc_paused_invalid_timeframe",
+        active_timeframe_id=invalid_timeframe.id,
+        status=AccountStatus.PAUSED,
+    )
+    active_account = _account("acc_active_without_timeframe")
+
+    async with SessionLocal() as session:
+        session.add_all([invalid_timeframe, paused_account, active_account])
+        await session.commit()
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account()
+
+    assert selection.account is not None
+    assert selection.account.id == active_account.id
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_applies_random_weekly_days_deterministically(db_setup):
+    include = _random_timeframe(
+        "tf_random_include",
+        random_seed=_random_seed_for_current_weekday("tf_random_include", include_current=True),
+    )
+    exclude = _random_timeframe(
+        "tf_random_exclude",
+        random_seed=_random_seed_for_current_weekday("tf_random_exclude", include_current=False),
+    )
+    included_account = _account("acc_random_include", active_timeframe_id=include.id)
+    excluded_account = _account("acc_random_exclude", active_timeframe_id=exclude.id)
+
+    async with SessionLocal() as session:
+        session.add_all([include, exclude, excluded_account, included_account])
+        await session.commit()
+
+    balancer = LoadBalancer(_repo_factory)
+    selection = await balancer.select_account()
+
+    assert selection.account is not None
+    assert selection.account.id == included_account.id
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_bypasses_selection_cache_for_active_timeframe_assignments(db_setup):
+    cache = get_account_selection_cache()
+    original_ttl = cache._ttl_seconds
+    cache._ttl_seconds = 60
+    try:
+        account = _account("acc_cache_timeframe")
+        tomorrow = (utcnow().weekday() + 1) % 7
+        outside = _timeframe("tf_cache_outside", weekdays=[tomorrow])
+        async with SessionLocal() as session:
+            session.add_all([outside, account])
+            await session.commit()
+
+        balancer = LoadBalancer(_repo_factory)
+        first = await balancer.select_account()
+        assert first.account is not None
+        assert first.account.id == account.id
+
+        async with SessionLocal() as session:
+            stored = await session.get(Account, account.id)
+            assert stored is not None
+            stored.active_timeframe_id = outside.id
+            await session.commit()
+
+        second = await balancer.select_account()
+
+        assert second.account is None
+        assert second.error_code == "account_outside_active_timeframe"
+    finally:
+        cache._ttl_seconds = original_ttl
+        cache.invalidate()
 
 
 @pytest.mark.asyncio

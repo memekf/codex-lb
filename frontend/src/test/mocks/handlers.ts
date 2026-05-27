@@ -84,6 +84,20 @@ const AccountProxyAssignmentPayloadSchema = z.object({
 	proxyId: z.string().nullable(),
 });
 
+const AccountActiveTimeframePayloadSchema = z.object({
+	displayName: z.string().min(1),
+	timezone: z.string().min(1),
+	startTime: z.string().min(1),
+	endTime: z.string().min(1),
+	mode: z.enum(["fixed_weekdays", "random_weekly_days"]),
+	weekdays: z.array(z.number()).optional(),
+	randomDaysPerWeek: z.number().nullable().optional(),
+});
+
+const AccountActiveTimeframeAssignmentPayloadSchema = z.object({
+	activeTimeframeId: z.string().nullable(),
+});
+
 const SettingsPayloadSchema = z
 	.object({
 		stickyThreadsEnabled: z.boolean().optional(),
@@ -132,6 +146,24 @@ type MockState = {
 		createdAt: string;
 		updatedAt: string;
 	}>;
+	timeframes: Array<{
+		id: string;
+		displayName: string;
+		timezone: string;
+		startTime: string;
+		endTime: string;
+		startMinute: number;
+		endMinute: number;
+		mode: "fixed_weekdays" | "random_weekly_days";
+		weekdays: number[];
+		randomDaysPerWeek: number | null;
+		currentWeekdays: number[];
+		availability: string;
+		availabilityReason: string;
+		nextChangeAt: string | null;
+		createdAt: string;
+		updatedAt: string;
+	}>;
 	firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
 	stickySessions: Array<{
 		key: string;
@@ -164,6 +196,26 @@ function createInitialState(): MockState {
 				updatedAt: new Date(Date.now() - 60_000).toISOString(),
 			},
 		],
+		timeframes: [
+			{
+				id: "timeframe_office",
+				displayName: "Office hours",
+				timezone: "UTC",
+				startTime: "09:00",
+				endTime: "17:00",
+				startMinute: 540,
+				endMinute: 1020,
+				mode: "fixed_weekdays",
+				weekdays: [0, 1, 2, 3, 4],
+				randomDaysPerWeek: null,
+				currentWeekdays: [0, 1, 2, 3, 4],
+				availability: "active",
+				availabilityReason: "none",
+				nextChangeAt: new Date(Date.now() + 3600_000).toISOString(),
+				createdAt: new Date(Date.now() - 3600_000).toISOString(),
+				updatedAt: new Date(Date.now() - 60_000).toISOString(),
+			},
+		],
 		firewallEntries: [],
 		stickySessions: [],
 	};
@@ -181,6 +233,11 @@ function parseDateValue(value: string | null): number | null {
 	}
 	const timestamp = new Date(value).getTime();
 	return Number.isNaN(timestamp) ? null : timestamp;
+}
+
+function minuteFromTime(value: string): number {
+	const [hour, minute] = value.split(":").map((part) => Number.parseInt(part, 10));
+	return hour * 60 + minute;
 }
 
 function filterRequestLogs(
@@ -488,6 +545,72 @@ export const handlers = [
 		return HttpResponse.json({ status: "deleted" });
 	}),
 
+	http.get("/api/active-timeframes", () => {
+		return HttpResponse.json({ timeframes: state.timeframes });
+	}),
+
+	http.post("/api/active-timeframes", async ({ request }) => {
+		const payload = await parseJsonBody(request, AccountActiveTimeframePayloadSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "validation_error", message: "Invalid active timeframe payload" } },
+				{ status: 422 },
+			);
+		}
+		const now = new Date().toISOString();
+		const startMinute = minuteFromTime(payload.startTime);
+		const endMinute = minuteFromTime(payload.endTime);
+		const timeframe = {
+			id: `timeframe_${state.timeframes.length + 1}`,
+			displayName: payload.displayName,
+			timezone: payload.timezone,
+			startTime: payload.startTime,
+			endTime: payload.endTime,
+			startMinute,
+			endMinute,
+			mode: payload.mode,
+			weekdays: payload.mode === "fixed_weekdays" ? (payload.weekdays ?? []) : [],
+			randomDaysPerWeek: payload.mode === "random_weekly_days" ? (payload.randomDaysPerWeek ?? 1) : null,
+			currentWeekdays: payload.mode === "fixed_weekdays" ? (payload.weekdays ?? []) : [1, 3, 5].slice(0, payload.randomDaysPerWeek ?? 1),
+			availability: "active",
+			availabilityReason: "none",
+			nextChangeAt: new Date(Date.now() + 3600_000).toISOString(),
+			createdAt: now,
+			updatedAt: now,
+		};
+		state.timeframes = [timeframe, ...state.timeframes];
+		return HttpResponse.json(timeframe);
+	}),
+
+	http.put("/api/active-timeframes/:timeframeId", async ({ params, request }) => {
+		const timeframe = state.timeframes.find((item) => item.id === String(params.timeframeId));
+		const payload = await parseJsonBody(request, AccountActiveTimeframePayloadSchema);
+		if (!timeframe || !payload) {
+			return HttpResponse.json(
+				{ error: { code: "active_timeframe_not_found", message: "Active timeframe not found" } },
+				{ status: 404 },
+			);
+		}
+		timeframe.displayName = payload.displayName;
+		timeframe.timezone = payload.timezone;
+		timeframe.startTime = payload.startTime;
+		timeframe.endTime = payload.endTime;
+		timeframe.startMinute = minuteFromTime(payload.startTime);
+		timeframe.endMinute = minuteFromTime(payload.endTime);
+		timeframe.mode = payload.mode;
+		timeframe.weekdays = payload.mode === "fixed_weekdays" ? (payload.weekdays ?? []) : [];
+		timeframe.randomDaysPerWeek = payload.mode === "random_weekly_days" ? (payload.randomDaysPerWeek ?? 1) : null;
+		timeframe.currentWeekdays =
+			payload.mode === "fixed_weekdays" ? timeframe.weekdays : [1, 3, 5].slice(0, timeframe.randomDaysPerWeek ?? 1);
+		timeframe.updatedAt = new Date().toISOString();
+		return HttpResponse.json(timeframe);
+	}),
+
+	http.delete("/api/active-timeframes/:timeframeId", ({ params }) => {
+		state.timeframes = state.timeframes.filter((item) => item.id !== String(params.timeframeId));
+		return HttpResponse.json({ status: "deleted" });
+	}),
+
 	http.post("/api/accounts/import", async () => {
 		const sequence = state.accounts.length + 1;
 		const created = createAccountSummary({
@@ -571,6 +694,32 @@ export const handlers = [
 		account.proxyAvailability = proxy ? "available" : "direct";
 		account.proxyAvailabilityReason = proxy ? "proxy_working" : "none";
 		return HttpResponse.json({ status: "updated", proxyId: payload.proxyId });
+	}),
+
+	http.put("/api/accounts/:accountId/active-timeframe", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		const payload = await parseJsonBody(request, AccountActiveTimeframeAssignmentPayloadSchema);
+		if (!account || !payload) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const timeframe = payload.activeTimeframeId
+			? state.timeframes.find((item) => item.id === payload.activeTimeframeId)
+			: null;
+		account.activeTimeframeId = payload.activeTimeframeId;
+		account.activeTimeframeDisplayName = timeframe?.displayName ?? null;
+		account.activeTimeframeMode = timeframe?.mode ?? null;
+		account.activeTimeframeTimezone = timeframe?.timezone ?? null;
+		account.activeTimeframeWindow = timeframe ? `${timeframe.startTime}-${timeframe.endTime}` : null;
+		account.activeTimeframeWeekdays = timeframe?.weekdays ?? [];
+		account.activeTimeframeResolvedWeekdays = timeframe?.currentWeekdays ?? [];
+		account.activeTimeframeAvailability = timeframe?.availability ?? "always";
+		account.activeTimeframeAvailabilityReason = timeframe?.availabilityReason ?? "none";
+		account.activeTimeframeNextChangeAt = timeframe?.nextChangeAt ?? null;
+		return HttpResponse.json({ status: "updated", activeTimeframeId: payload.activeTimeframeId });
 	}),
 
 	http.put("/api/accounts/:accountId/limit-warmup", async ({ params, request }) => {

@@ -7,8 +7,9 @@ import pytest
 
 from app.core.auth import generate_unique_account_id, parse_auth_json
 from app.core.utils.time import utcnow
-from app.db.models import AccountProxy, AccountProxyStatus
+from app.db.models import AccountActiveTimeframe, AccountProxy, AccountProxyStatus
 from app.db.session import SessionLocal
+from app.modules.proxy.account_cache import get_account_selection_cache
 
 pytestmark = pytest.mark.integration
 
@@ -17,6 +18,47 @@ def _encode_jwt(payload: dict) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
     return f"header.{body}.sig"
+
+
+def _auth_json(*, email: str, raw_account_id: str) -> dict:
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    return {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+
+
+async def _import_account(async_client, *, email: str, raw_account_id: str) -> str:
+    auth_json = _auth_json(email=email, raw_account_id=raw_account_id)
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
+    response = await async_client.post("/api/accounts/import", files=files)
+    assert response.status_code == 200
+    return expected_account_id
+
+
+async def _create_timeframe(async_client) -> str:
+    response = await async_client.post(
+        "/api/active-timeframes",
+        json={
+            "displayName": "Office hours",
+            "timezone": "UTC",
+            "startTime": "09:00",
+            "endTime": "17:00",
+            "mode": "fixed_weekdays",
+            "weekdays": [0, 1, 2, 3, 4],
+        },
+    )
+    assert response.status_code == 200
+    return response.json()["id"]
 
 
 @pytest.mark.asyncio
@@ -57,6 +99,127 @@ async def test_import_and_list_accounts(async_client):
     assert matched["proxyStatus"] is None
     assert matched["proxyAvailability"] == "direct"
     assert matched["proxyAvailabilityReason"] == "none"
+    assert matched["activeTimeframeId"] is None
+    assert matched["activeTimeframeDisplayName"] is None
+    assert matched["activeTimeframeAvailability"] == "always"
+    assert matched["activeTimeframeAvailabilityReason"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_set_clear_and_preserve_account_active_timeframe(async_client):
+    email = "timeframe-account@example.com"
+    raw_account_id = "acc_timeframe"
+    account_id = await _import_account(async_client, email=email, raw_account_id=raw_account_id)
+    timeframe_id = await _create_timeframe(async_client)
+    selection_cache = get_account_selection_cache()
+    generation_before_assignment = selection_cache.generation
+
+    assigned = await async_client.put(
+        f"/api/accounts/{account_id}/active-timeframe",
+        json={"activeTimeframeId": timeframe_id},
+    )
+
+    assert assigned.status_code == 200
+    assert assigned.json() == {"status": "updated", "activeTimeframeId": timeframe_id}
+    assert selection_cache.generation > generation_before_assignment
+
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matched = next(account for account in accounts.json()["accounts"] if account["accountId"] == account_id)
+    assert matched["activeTimeframeId"] == timeframe_id
+    assert matched["activeTimeframeDisplayName"] == "Office hours"
+    assert matched["activeTimeframeMode"] == "fixed_weekdays"
+    assert matched["activeTimeframeTimezone"] == "UTC"
+    assert matched["activeTimeframeWindow"] == "09:00-17:00"
+    assert matched["activeTimeframeWeekdays"] == [0, 1, 2, 3, 4]
+    assert matched["activeTimeframeResolvedWeekdays"] == [0, 1, 2, 3, 4]
+    assert matched["activeTimeframeAvailability"] in {"active", "inactive"}
+    assert matched["activeTimeframeAvailabilityReason"] in {"none", "outside_window"}
+    assert "activeTimeframeNextChangeAt" in matched
+
+    files = {
+        "auth_json": (
+            "auth.json",
+            json.dumps(_auth_json(email=email, raw_account_id=raw_account_id)),
+            "application/json",
+        )
+    }
+    imported_again = await async_client.post("/api/accounts/import", files=files)
+    assert imported_again.status_code == 200
+
+    accounts_after_import = await async_client.get("/api/accounts")
+    matched_after_import = next(
+        account for account in accounts_after_import.json()["accounts"] if account["accountId"] == account_id
+    )
+    assert matched_after_import["activeTimeframeId"] == timeframe_id
+
+    exported = await async_client.post(f"/api/accounts/{account_id}/export")
+    assert exported.status_code == 200
+    exported_auth = json.loads(exported.json()["authJson"])
+    assert "active_timeframe_id" not in json.dumps(exported_auth)
+    assert "activeTimeframeId" not in json.dumps(exported_auth)
+
+    generation_before_clear = selection_cache.generation
+    cleared = await async_client.put(
+        f"/api/accounts/{account_id}/active-timeframe",
+        json={"activeTimeframeId": None},
+    )
+
+    assert cleared.status_code == 200
+    assert cleared.json() == {"status": "updated", "activeTimeframeId": None}
+    assert selection_cache.generation > generation_before_clear
+
+
+@pytest.mark.asyncio
+async def test_list_accounts_returns_invalid_metadata_for_malformed_active_timeframe_weekdays(async_client):
+    email = "malformed-timeframe-account@example.com"
+    raw_account_id = "acc_malformed_timeframe"
+    account_id = await _import_account(async_client, email=email, raw_account_id=raw_account_id)
+    timeframe_id = await _create_timeframe(async_client)
+
+    assigned = await async_client.put(
+        f"/api/accounts/{account_id}/active-timeframe",
+        json={"activeTimeframeId": timeframe_id},
+    )
+    assert assigned.status_code == 200
+
+    async with SessionLocal() as session:
+        timeframe = await session.get(AccountActiveTimeframe, timeframe_id)
+        assert timeframe is not None
+        timeframe.weekdays = "{not-json"
+        await session.commit()
+
+    accounts = await async_client.get("/api/accounts")
+
+    assert accounts.status_code == 200
+    matched = next(account for account in accounts.json()["accounts"] if account["accountId"] == account_id)
+    assert matched["activeTimeframeId"] == timeframe_id
+    assert matched["activeTimeframeDisplayName"] == "Office hours"
+    assert matched["activeTimeframeAvailability"] == "invalid"
+    assert matched["activeTimeframeAvailabilityReason"] == "timeframe_invalid"
+
+
+@pytest.mark.asyncio
+async def test_set_account_active_timeframe_rejects_missing_account_or_timeframe(async_client):
+    account_id = await _import_account(
+        async_client,
+        email="missing-timeframe@example.com",
+        raw_account_id="acc_missing_timeframe",
+    )
+
+    missing_timeframe = await async_client.put(
+        f"/api/accounts/{account_id}/active-timeframe",
+        json={"activeTimeframeId": "missing-timeframe"},
+    )
+    assert missing_timeframe.status_code == 404
+    assert missing_timeframe.json()["error"]["code"] == "active_timeframe_not_found"
+
+    missing_account = await async_client.put(
+        "/api/accounts/missing-account/active-timeframe",
+        json={"activeTimeframeId": None},
+    )
+    assert missing_account.status_code == 404
+    assert missing_account.json()["error"]["code"] == "account_not_found"
 
 
 @pytest.mark.asyncio

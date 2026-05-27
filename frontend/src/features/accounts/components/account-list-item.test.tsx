@@ -119,4 +119,35 @@ describe("AccountListItem", () => {
 
     expect(screen.getByTestId("mini-quota-track-weekly-fill")).toHaveStyle({ width: "73%" });
   });
+
+  it("renders assigned active timeframe name and state", () => {
+    const account = createAccountSummary({
+      activeTimeframeId: "tf-office",
+      activeTimeframeDisplayName: "Office hours",
+      activeTimeframeAvailability: "active",
+      activeTimeframeAvailabilityReason: "none",
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText("Timeframe: Office hours (active)")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["inactive", "outside_window", "Timeframe: Office hours (inactive)"],
+    ["missing", "timeframe_missing", "Timeframe: Office hours (missing)"],
+    ["invalid", "timeframe_invalid", "Timeframe: Office hours (invalid)"],
+  ])("renders %s active timeframe state as an issue", (availability, reason, label) => {
+    const account = createAccountSummary({
+      activeTimeframeId: "tf-office",
+      activeTimeframeDisplayName: "Office hours",
+      activeTimeframeAvailability: availability,
+      activeTimeframeAvailabilityReason: reason,
+    });
+
+    render(<AccountListItem account={account} selected={false} onSelect={vi.fn()} />);
+
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText("Timeframe issue")).toBeInTheDocument();
+  });
 });

@@ -2,6 +2,8 @@ import { del, get, post, put } from "@/lib/api-client";
 
 import {
   AccountActionResponseSchema,
+  AccountActiveTimeframeAssignmentRequestSchema,
+  AccountActiveTimeframeAssignmentResponseSchema,
   AccountAliasRequestSchema,
   AccountAliasResponseSchema,
   AccountExportResponseSchema,
@@ -75,6 +77,15 @@ export function setAccountProxy(accountId: string, proxyId: string | null) {
   return put(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/proxy`,
     AccountProxyAssignmentResponseSchema,
+    { body: payload },
+  );
+}
+
+export function setAccountActiveTimeframe(accountId: string, activeTimeframeId: string | null) {
+  const payload = AccountActiveTimeframeAssignmentRequestSchema.parse({ activeTimeframeId });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/active-timeframe`,
+    AccountActiveTimeframeAssignmentResponseSchema,
     { body: payload },
   );
 }

@@ -20,6 +20,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.account_active_timeframes.repository import AccountActiveTimeframeRepository
 from app.modules.account_proxies.repository import AccountProxyRepository
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
 from app.modules.accounts.repository import AccountsRepository
@@ -58,6 +59,10 @@ class AccountProxyNotFoundError(Exception):
     pass
 
 
+class AccountActiveTimeframeNotFoundError(Exception):
+    pass
+
+
 class AccountsService:
     def __init__(
         self,
@@ -66,12 +71,14 @@ class AccountsService:
         additional_usage_repo: AdditionalUsageRepository | AdditionalUsageRepositoryPort | None = None,
         limit_warmup_repo: LimitWarmupRepository | None = None,
         account_proxy_repo: AccountProxyRepository | None = None,
+        account_active_timeframe_repo: AccountActiveTimeframeRepository | None = None,
     ) -> None:
         self._repo = repo
         self._usage_repo = usage_repo
         self._additional_usage_repo = additional_usage_repo
         self._limit_warmup_repo = limit_warmup_repo
         self._account_proxy_repo = account_proxy_repo
+        self._account_active_timeframe_repo = account_active_timeframe_repo
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
         self._encryptor = TokenEncryptor()
 
@@ -273,6 +280,22 @@ class AccountsService:
             raise AccountNotFoundError("Account not found")
         get_account_selection_cache().invalidate()
         return proxy_id
+
+    async def set_account_active_timeframe(self, account_id: str, active_timeframe_id: str | None) -> str | None:
+        account = await self._repo.get_by_id(account_id)
+        if account is None:
+            raise AccountNotFoundError("Account not found")
+        if active_timeframe_id is not None:
+            if (
+                self._account_active_timeframe_repo is None
+                or not await self._account_active_timeframe_repo.exists(active_timeframe_id)
+            ):
+                raise AccountActiveTimeframeNotFoundError("Active timeframe not found")
+        updated = await self._repo.update_active_timeframe_id(account_id, active_timeframe_id)
+        if not updated:
+            raise AccountNotFoundError("Account not found")
+        get_account_selection_cache().invalidate()
+        return active_timeframe_id
 
     async def export_account(self, account_id: str) -> AccountExportResponse | None:
         account = await self._repo.get_by_id(account_id)

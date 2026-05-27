@@ -39,6 +39,8 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
   const warmupMeta = account.limitWarmup
     ? `${formatSlug(account.limitWarmup.status)} | ${formatSlug(account.limitWarmup.model)} | ${formatDateTimeInline(account.limitWarmup.completedAt ?? account.limitWarmup.attemptedAt)}`
     : "No attempts";
+  const timeframeLabel = formatActiveTimeframeLabel(account);
+  const timeframeIssue = hasActiveTimeframeIssue(account);
 
   return (
     <button
@@ -65,6 +67,11 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
             Proxy issue
           </Badge>
         ) : null}
+        {timeframeIssue ? (
+          <Badge variant="outline" className="border-amber-500/20 bg-amber-500/15 text-amber-700 dark:text-amber-400">
+            Timeframe issue
+          </Badge>
+        ) : null}
         <StatusBadge status={status} />
       </div>
       <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>
@@ -78,8 +85,36 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
       <div className="mt-1 truncate text-[10px] text-muted-foreground">
         {account.proxyId ? `Proxy: ${account.proxyDisplayName ?? account.proxyId} (${account.proxyAvailability})` : "Proxy: direct"}
       </div>
+      {timeframeLabel ? (
+        <div
+          className={cn(
+            "mt-1 truncate text-[10px] text-muted-foreground",
+            timeframeIssue ? "text-amber-700 dark:text-amber-400" : null,
+          )}
+        >
+          {timeframeLabel}
+        </div>
+      ) : null}
     </button>
   );
+}
+
+function formatActiveTimeframeLabel(account: AccountSummary): string | null {
+  if (!account.activeTimeframeId) {
+    return null;
+  }
+  const name = account.activeTimeframeDisplayName ?? account.activeTimeframeId;
+  const availability = account.activeTimeframeAvailability ?? "invalid";
+  return `Timeframe: ${name} (${availability.replace(/_/g, " ")})`;
+}
+
+function hasActiveTimeframeIssue(account: AccountSummary): boolean {
+  if (!account.activeTimeframeId) {
+    return false;
+  }
+  return account.activeTimeframeAvailability === "inactive"
+    || account.activeTimeframeAvailability === "missing"
+    || account.activeTimeframeAvailability === "invalid";
 }
 
 function MiniQuotaRow({

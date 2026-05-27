@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import gzip
+import inspect
 import json
 import logging
 import math
@@ -14479,7 +14480,7 @@ async def _connect_responses_websocket_compatible(
 
 async def _resolve_account_transport_fingerprint(account_id: str) -> str:
     try:
-        return (await account_proxy.resolve_transport(account_id)).proxy_fingerprint
+        return (await account_proxy.resolve_transport(account_id, enforce_active_timeframe=False)).proxy_fingerprint
     except account_proxy.AccountProxyTransportError as exc:
         raise ProxyResponseError(
             502,

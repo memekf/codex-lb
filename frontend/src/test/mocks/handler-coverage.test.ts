@@ -39,6 +39,7 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/accounts/:accountId/export",
 	"DELETE /api/accounts/:accountId",
 	"PUT /api/accounts/:accountId/proxy",
+	"PUT /api/accounts/:accountId/active-timeframe",
 	// proxies
 	"GET /api/proxies",
 	"POST /api/proxies",
@@ -46,6 +47,11 @@ const EXPECTED_ENDPOINTS = [
 	"POST /api/proxies/:proxyId/test",
 	"PUT /api/proxies/:proxyId",
 	"DELETE /api/proxies/:proxyId",
+	// active timeframes
+	"GET /api/active-timeframes",
+	"POST /api/active-timeframes",
+	"PUT /api/active-timeframes/:timeframeId",
+	"DELETE /api/active-timeframes/:timeframeId",
 	// oauth
 	"POST /api/oauth/start",
 	"GET /api/oauth/status",
