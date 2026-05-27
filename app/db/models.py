@@ -758,6 +758,13 @@ Index(
 )
 Index("idx_account_proxies_status", AccountProxy.status)
 Index("idx_accounts_proxy_id", Account.proxy_id)
+Index(
+    "idx_usage_window_raw_account_latest",
+    UsageHistory.window,
+    UsageHistory.account_id,
+    UsageHistory.recorded_at.desc(),
+    UsageHistory.id.desc(),
+)
 Index("idx_accounts_email", Account.email)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)

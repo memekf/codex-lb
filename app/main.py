@@ -26,6 +26,7 @@ from app.core.metrics.middleware import MetricsMiddleware
 from app.core.metrics.prometheus import MULTIPROCESS_MODE, PROMETHEUS_AVAILABLE, make_scrape_registry, mark_process_dead
 from app.core.middleware import (
     add_api_firewall_middleware,
+    add_app_version_middleware,
     add_backend_api_codex_v1_alias_middleware,
     add_dashboard_auth_proxy_middleware,
     add_request_decompression_middleware,
@@ -59,6 +60,7 @@ from app.modules.proxy.ring_membership import (
     RingMembershipService,
 )
 from app.modules.request_logs import api as request_logs_api
+from app.modules.runtime import api as runtime_api
 from app.modules.settings import api as settings_api
 from app.modules.sticky_sessions import api as sticky_sessions_api
 from app.modules.sticky_sessions.cleanup_scheduler import build_sticky_session_cleanup_scheduler
@@ -349,6 +351,7 @@ def create_app() -> FastAPI:
         ),
     )
     add_backend_api_codex_v1_alias_middleware(app)
+    add_app_version_middleware(app)
     add_exception_handlers(app)
 
     app.include_router(account_proxies_api.router)
@@ -367,6 +370,7 @@ def create_app() -> FastAPI:
     app.include_router(usage_api.router)
     app.include_router(request_logs_api.router)
     app.include_router(conversation_archive_api.router)
+    app.include_router(runtime_api.router)
     app.include_router(oauth_api.router)
     app.include_router(dashboard_auth_api.router)
     app.include_router(settings_api.router)

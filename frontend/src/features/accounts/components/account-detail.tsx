@@ -25,6 +25,7 @@ export type AccountDetailProps = {
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
   proxies?: AccountProxy[];
   onSetProxy?: (accountId: string, proxyId: string | null) => void;
+  onExportOpenCodeAuth: (accountId: string) => void;
 };
 
 export function AccountDetail({
@@ -40,6 +41,7 @@ export function AccountDetail({
   onLimitWarmupChange,
   proxies = [],
   onSetProxy,
+  onExportOpenCodeAuth,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -120,6 +122,7 @@ export function AccountDetail({
         onReauth={onReauth}
         onExport={onExport}
         onLimitWarmupChange={onLimitWarmupChange}
+        onExportOpenCodeAuth={onExportOpenCodeAuth}
       />
     </div>
   );

@@ -1,24 +1,29 @@
-import { Suspense, lazy, useCallback, useMemo } from "react";
+import { Suspense, lazy, useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { AlertMessage } from "@/components/alert-message";
 import { LoadingOverlay } from "@/components/layout/loading-overlay";
+import { Checkbox } from "@/components/ui/checkbox";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { AccountDetail } from "@/features/accounts/components/account-detail";
 import { AccountList } from "@/features/accounts/components/account-list";
 import { AccountsSkeleton } from "@/features/accounts/components/accounts-skeleton";
 import { ImportDialog } from "@/features/accounts/components/import-dialog";
+import { OpenCodeAuthExportDialog } from "@/features/accounts/components/opencode-auth-export-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
 import { useProxies } from "@/features/proxies/hooks/use-proxies";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
+import type { AccountOpenCodeAuthExportResponse } from "@/features/accounts/schemas";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
 const OauthDialog = lazy(() =>
-  import("@/features/accounts/components/oauth-dialog").then((m) => ({ default: m.OauthDialog })),
+  import("@/features/accounts/components/oauth-dialog").then((m) => ({
+    default: m.OauthDialog,
+  })),
 );
 
 export function AccountsPage() {
@@ -33,6 +38,7 @@ export function AccountsPage() {
     exportMutation,
     limitWarmupMutation,
     setProxyMutation,
+    exportOpenCodeAuthMutation,
   } = useAccounts();
   const oauth = useOauth();
   const { proxiesQuery } = useProxies();
@@ -40,24 +46,41 @@ export function AccountsPage() {
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
   const deleteDialog = useDialogState<string>();
+  const exportDialog = useDialogState<AccountOpenCodeAuthExportResponse>();
+  const [deleteHistory, setDeleteHistory] = useState(false);
 
-  const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
+  const accounts = useMemo(
+    () => accountsQuery.data ?? [],
+    [accountsQuery.data],
+  );
   const quotaDisplay = useAccountQuotaDisplayStore((s) => s.quotaDisplay);
-  const sortedAccounts = useMemo(() => sortAccountsForDisplay(accounts, quotaDisplay), [accounts, quotaDisplay]);
-  const duplicateAccountIds = useMemo(() => buildDuplicateAccountIdSet(accounts), [accounts]);
+  const sortedAccounts = useMemo(
+    () => sortAccountsForDisplay(accounts, quotaDisplay),
+    [accounts, quotaDisplay],
+  );
+  const duplicateAccountIds = useMemo(
+    () => buildDuplicateAccountIdSet(accounts),
+    [accounts],
+  );
   const selectedAccountId = searchParams.get("selected");
 
-  const handleSelectAccount = useCallback((accountId: string) => {
-    const nextSearchParams = new URLSearchParams(searchParams);
-    nextSearchParams.set("selected", accountId);
-    setSearchParams(nextSearchParams);
-  }, [searchParams, setSearchParams]);
+  const handleSelectAccount = useCallback(
+    (accountId: string) => {
+      const nextSearchParams = new URLSearchParams(searchParams);
+      nextSearchParams.set("selected", accountId);
+      setSearchParams(nextSearchParams);
+    },
+    [searchParams, setSearchParams],
+  );
 
   const resolvedSelectedAccountId = useMemo(() => {
     if (accounts.length === 0) {
       return null;
     }
-    if (selectedAccountId && accounts.some((account) => account.accountId === selectedAccountId)) {
+    if (
+      selectedAccountId &&
+      accounts.some((account) => account.accountId === selectedAccountId)
+    ) {
       return selectedAccountId;
     }
     return sortedAccounts[0]?.accountId ?? null;
@@ -66,7 +89,9 @@ export function AccountsPage() {
   const selectedAccount = useMemo(
     () =>
       resolvedSelectedAccountId
-        ? accounts.find((account) => account.accountId === resolvedSelectedAccountId) ?? null
+        ? (accounts.find(
+            (account) => account.accountId === resolvedSelectedAccountId,
+          ) ?? null)
         : null,
     [accounts, resolvedSelectedAccountId],
   );
@@ -79,7 +104,8 @@ export function AccountsPage() {
     deleteMutation.isPending ||
     exportMutation.isPending ||
     limitWarmupMutation.isPending ||
-    setProxyMutation.isPending;
+    setProxyMutation.isPending ||
+    exportOpenCodeAuthMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
@@ -89,7 +115,8 @@ export function AccountsPage() {
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(exportMutation.error) ||
     getErrorMessageOrNull(limitWarmupMutation.error) ||
-    getErrorMessageOrNull(setProxyMutation.error);
+    getErrorMessageOrNull(setProxyMutation.error) ||
+    getErrorMessageOrNull(exportOpenCodeAuthMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -101,7 +128,9 @@ export function AccountsPage() {
         </p>
       </div>
 
-      {mutationError ? <AlertMessage variant="error">{mutationError}</AlertMessage> : null}
+      {mutationError ? (
+        <AlertMessage variant="error">{mutationError}</AlertMessage>
+      ) : null}
 
       {!accountsQuery.data ? (
         <AccountsSkeleton />
@@ -119,14 +148,26 @@ export function AccountsPage() {
 
           <AccountDetail
             account={selectedAccount}
-            showAccountId={selectedAccount ? duplicateAccountIds.has(selectedAccount.accountId) : false}
+            showAccountId={
+              selectedAccount
+                ? duplicateAccountIds.has(selectedAccount.accountId)
+                : false
+            }
             busy={mutationBusy}
             onPause={(accountId) => void pauseMutation.mutateAsync(accountId)}
             onResume={(accountId) => void resumeMutation.mutateAsync(accountId)}
-            onSetAlias={(accountId, alias) => setAliasMutation.mutateAsync({ accountId, alias })}
+            onSetAlias={(accountId, alias) =>
+              setAliasMutation.mutateAsync({ accountId, alias })
+            }
             onDelete={(accountId) => deleteDialog.show(accountId)}
             onReauth={() => oauthDialog.show()}
             onExport={(accountId) => void exportMutation.mutateAsync(accountId)}
+            onExportOpenCodeAuth={(accountId) => {
+              void exportOpenCodeAuthMutation
+                .mutateAsync(accountId)
+                .then((result) => exportDialog.show(result))
+                .catch(() => null);
+            }}
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
             }
@@ -167,24 +208,53 @@ export function AccountsPage() {
         />
       </Suspense>
 
+      <OpenCodeAuthExportDialog
+        open={exportDialog.open}
+        exportData={exportDialog.data}
+        onOpenChange={exportDialog.onOpenChange}
+      />
+
       <ConfirmDialog
         open={deleteDialog.open}
         title="Delete account"
         description="This action removes the account from the load balancer configuration."
         confirmLabel="Delete"
         cancelLabel="Cancel"
-        onOpenChange={deleteDialog.onOpenChange}
+        onOpenChange={(open) => {
+          deleteDialog.onOpenChange(open);
+          if (!open) setDeleteHistory(false);
+        }}
         onConfirm={() => {
           if (!deleteDialog.data) {
             return;
           }
-          void deleteMutation.mutateAsync(deleteDialog.data).finally(() => {
-            deleteDialog.hide();
-          });
+          void deleteMutation
+            .mutateAsync({ accountId: deleteDialog.data, deleteHistory })
+            .finally(() => {
+              deleteDialog.hide();
+              setDeleteHistory(false);
+            });
         }}
-      />
+      >
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="delete-history"
+            checked={deleteHistory}
+            onCheckedChange={(checked) => setDeleteHistory(checked === true)}
+          />
+          <label
+            htmlFor="delete-history"
+            className="text-sm text-muted-foreground cursor-pointer"
+          >
+            Delete all history for this account
+          </label>
+        </div>
+      </ConfirmDialog>
 
-      <LoadingOverlay visible={!!accountsQuery.data && mutationBusy} label="Updating accounts..." />
+      <LoadingOverlay
+        visible={!!accountsQuery.data && mutationBusy}
+        label="Updating accounts..."
+      />
     </div>
   );
 }
