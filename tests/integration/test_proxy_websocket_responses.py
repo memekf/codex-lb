@@ -22,7 +22,15 @@ def _stub_request_logging(monkeypatch: pytest.MonkeyPatch) -> None:
         del self, kwargs
         return None
 
+    async def resolve_fingerprint(_account_id: str) -> str:
+        return "none"
+
+    async def transport_matches(*_args: object, **_kwargs: object) -> bool:
+        return True
+
     monkeypatch.setattr(proxy_module.ProxyService, "_write_request_log", fake_write_request_log)
+    monkeypatch.setattr(proxy_module, "_resolve_account_transport_fingerprint", resolve_fingerprint)
+    monkeypatch.setattr(proxy_module, "_websocket_upstream_matches_current_transport", transport_matches)
 
 
 class _FakeUpstreamMessage:

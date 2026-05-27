@@ -8,6 +8,8 @@ import { AccountTokenInfo } from "@/features/accounts/components/account-token-i
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { useAccountTrends } from "@/features/accounts/hooks/use-accounts";
+import type { AccountProxy } from "@/features/proxies/schemas";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { formatCompactAccountId } from "@/utils/account-identifiers";
 
 export type AccountDetailProps = {
@@ -21,6 +23,8 @@ export type AccountDetailProps = {
   onReauth: () => void;
   onExport: (accountId: string) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
+  proxies?: AccountProxy[];
+  onSetProxy?: (accountId: string, proxyId: string | null) => void;
 };
 
 export function AccountDetail({
@@ -34,6 +38,8 @@ export function AccountDetail({
   onReauth,
   onExport,
   onLimitWarmupChange,
+  proxies = [],
+  onSetProxy,
 }: AccountDetailProps) {
   const { data: trends } = useAccountTrends(account?.accountId ?? null);
   const blurred = usePrivacyStore((s) => s.blurred);
@@ -73,6 +79,36 @@ export function AccountDetail({
       </div>
 
       <AccountAliasForm account={account} busy={busy} onSetAlias={onSetAlias} />
+      <div className="rounded-lg border bg-muted/10 p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <p className="text-sm font-medium">Proxy</p>
+            <p className="mt-0.5 truncate text-xs text-muted-foreground">
+              {account.proxyId
+                ? `${account.proxyDisplayName ?? account.proxyId} | ${account.proxyAvailability}`
+                : "Direct egress"}
+              {account.proxyLastTestError ? ` | ${account.proxyLastTestError}` : ""}
+            </p>
+          </div>
+          <Select
+            value={account.proxyId ?? "__direct__"}
+            disabled={busy || !onSetProxy}
+            onValueChange={(value) => onSetProxy?.(account.accountId, value === "__direct__" ? null : value)}
+          >
+            <SelectTrigger aria-label="Account proxy" className="w-full sm:w-64">
+              <SelectValue placeholder="Select proxy" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__direct__">Direct</SelectItem>
+              {proxies.map((proxy) => (
+                <SelectItem key={proxy.id} value={proxy.id}>
+                  {proxy.displayName} ({proxy.status})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
       <AccountUsagePanel account={account} trends={trends} />
       <AccountTokenInfo account={account} />
       <AccountActions

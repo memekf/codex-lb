@@ -9,7 +9,7 @@ import pytest
 from app.core.balancer import HEALTH_TIER_DRAINING
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountProxy, AccountProxyStatus, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -235,6 +235,170 @@ async def test_load_balancer_treats_weekly_only_primary_as_quota_window(db_setup
         assert refreshed_free is not None
         await session.refresh(refreshed_free)
         assert refreshed_free.status == AccountStatus.QUOTA_EXCEEDED
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_excludes_failed_assigned_proxy_but_allows_untested_proxy(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    failed_proxy = AccountProxy(
+        id="proxy_failed",
+        display_name="Failed egress",
+        proxy_url_encrypted=encryptor.encrypt("https://failed.example.com:8443"),
+        status=AccountProxyStatus.FAILED,
+    )
+    untested_proxy = AccountProxy(
+        id="proxy_untested",
+        display_name="Untested egress",
+        proxy_url_encrypted=encryptor.encrypt("https://untested.example.com:8443"),
+        status=AccountProxyStatus.UNTESTED,
+    )
+    invalid_proxy = AccountProxy(
+        id="proxy_invalid",
+        display_name="Invalid egress",
+        proxy_url_encrypted=encryptor.encrypt("socks5://invalid.example.com:1080"),
+        status=AccountProxyStatus.WORKING,
+    )
+    undecryptable_proxy = AccountProxy(
+        id="proxy_undecryptable",
+        display_name="Undecryptable egress",
+        proxy_url_encrypted=b"not-encrypted",
+        status=AccountProxyStatus.WORKING,
+    )
+    failed_account = Account(
+        id="acc_failed_proxy",
+        email="failed-proxy@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("failed-access"),
+        refresh_token_encrypted=encryptor.encrypt("failed-refresh"),
+        id_token_encrypted=encryptor.encrypt("failed-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+        proxy_id=failed_proxy.id,
+    )
+    untested_account = Account(
+        id="acc_untested_proxy",
+        email="untested-proxy@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("untested-access"),
+        refresh_token_encrypted=encryptor.encrypt("untested-refresh"),
+        id_token_encrypted=encryptor.encrypt("untested-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+        proxy_id=untested_proxy.id,
+    )
+    invalid_account = Account(
+        id="acc_invalid_proxy",
+        email="invalid-proxy@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("invalid-access"),
+        refresh_token_encrypted=encryptor.encrypt("invalid-refresh"),
+        id_token_encrypted=encryptor.encrypt("invalid-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+        proxy_id=invalid_proxy.id,
+    )
+    undecryptable_account = Account(
+        id="acc_undecryptable_proxy",
+        email="undecryptable-proxy@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("undecryptable-access"),
+        refresh_token_encrypted=encryptor.encrypt("undecryptable-refresh"),
+        id_token_encrypted=encryptor.encrypt("undecryptable-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        deactivation_reason=None,
+        proxy_id=undecryptable_proxy.id,
+    )
+
+    async with SessionLocal() as session:
+        session.add_all([failed_proxy, untested_proxy, invalid_proxy, undecryptable_proxy])
+        await session.commit()
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(failed_account)
+        await accounts_repo.upsert(untested_account)
+        await accounts_repo.upsert(invalid_account)
+        await accounts_repo.upsert(undecryptable_account)
+
+        balancer = LoadBalancer(_repo_factory)
+        failed_selection = await balancer.select_account(account_ids={failed_account.id})
+        assert failed_selection.account is None
+
+        untested_selection = await balancer.select_account(account_ids={untested_account.id})
+        assert untested_selection.account is not None
+        assert untested_selection.account.id == untested_account.id
+
+        invalid_selection = await balancer.select_account(account_ids={invalid_account.id})
+        assert invalid_selection.account is None
+
+        undecryptable_selection = await balancer.select_account(account_ids={undecryptable_account.id})
+        assert undecryptable_selection.account is None
+
+        refreshed_failed = await session.get(Account, failed_account.id)
+        assert refreshed_failed is not None
+        assert refreshed_failed.status == AccountStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_load_balancer_preserves_proxy_eligibility_while_retest_is_in_progress(db_setup):
+    encryptor = TokenEncryptor()
+    now = utcnow()
+    failed_proxy = AccountProxy(
+        id="proxy_testing_failed",
+        display_name="Failed under retest",
+        proxy_url_encrypted=encryptor.encrypt("https://failed-retest.example.com:8443"),
+        status=AccountProxyStatus.TESTING,
+        last_tested_at=now,
+        last_test_error="previous failure",
+    )
+    working_proxy = AccountProxy(
+        id="proxy_testing_working",
+        display_name="Working under retest",
+        proxy_url_encrypted=encryptor.encrypt("https://working-retest.example.com:8443"),
+        status=AccountProxyStatus.TESTING,
+        last_tested_at=now,
+        last_test_latency_ms=10,
+    )
+    failed_account = Account(
+        id="acc_testing_failed",
+        email="testing-failed@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("failed-access"),
+        refresh_token_encrypted=encryptor.encrypt("failed-refresh"),
+        id_token_encrypted=encryptor.encrypt("failed-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        proxy_id=failed_proxy.id,
+    )
+    working_account = Account(
+        id="acc_testing_working",
+        email="testing-working@example.com",
+        plan_type="plus",
+        access_token_encrypted=encryptor.encrypt("working-access"),
+        refresh_token_encrypted=encryptor.encrypt("working-refresh"),
+        id_token_encrypted=encryptor.encrypt("working-id"),
+        last_refresh=now,
+        status=AccountStatus.ACTIVE,
+        proxy_id=working_proxy.id,
+    )
+
+    async with SessionLocal() as session:
+        session.add_all([failed_proxy, working_proxy])
+        await session.commit()
+        accounts_repo = AccountsRepository(session)
+        await accounts_repo.upsert(failed_account)
+        await accounts_repo.upsert(working_account)
+
+        balancer = LoadBalancer(_repo_factory)
+        failed_selection = await balancer.select_account(account_ids={failed_account.id})
+        assert failed_selection.account is None
+
+        working_selection = await balancer.select_account(account_ids={working_account.id})
+        assert working_selection.account is not None
+        assert working_selection.account.id == working_account.id
 
 
 @pytest.mark.asyncio

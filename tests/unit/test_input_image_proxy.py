@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 from typing import cast
 
 import pytest
@@ -219,3 +220,31 @@ async def test_fetch_image_data_url_uses_fallback_ip_when_first_fails(monkeypatc
     assert len(session.calls) == 2
     assert session.calls[0]["url"] == "https://[2001:db8::1]/a.png"
     assert session.calls[1]["url"] == "https://93.184.216.34/a.png"
+
+
+@pytest.mark.asyncio
+async def test_account_bound_image_fetch_uses_account_proxy_transport(monkeypatch):
+    async def resolve_ips(host: str, *, timeout_seconds: float):
+        del host, timeout_seconds
+        return ["93.184.216.34"]
+
+    seen: dict[str, object] = {}
+    response = FakeResponse(200, {"Content-Type": "image/png"}, [b"ok"])
+
+    @contextlib.asynccontextmanager
+    async def account_get(local_account_id: str, url: str, **kwargs: object):
+        seen.update(local_account_id=local_account_id, url=url, kwargs=kwargs)
+        yield response
+
+    monkeypatch.setattr(proxy_module, "_resolve_global_ips", resolve_ips)
+    monkeypatch.setattr(proxy_module.account_proxy, "get", account_get)
+
+    image_session = proxy_module._image_fetch_session(
+        cast(proxy_module.aiohttp.ClientSession, object()),
+        "local-account",
+    )
+    data_url = await proxy_module._fetch_image_data_url(image_session, "https://example.com/a.png", 1.0)
+
+    assert data_url is not None
+    assert seen["local_account_id"] == "local-account"
+    assert seen["url"] == "https://93.184.216.34/a.png"

@@ -26,6 +26,7 @@ class DurableBridgeLookup:
     canonical_key: str
     api_key_scope: str
     account_id: str | None
+    proxy_fingerprint: str | None
     owner_instance_id: str | None
     owner_epoch: int
     lease_expires_at: datetime | None
@@ -108,6 +109,7 @@ class DurableBridgeSessionCoordinator:
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
+        proxy_fingerprint: str | None = None,
     ) -> DurableBridgeLookup:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
@@ -120,6 +122,7 @@ class DurableBridgeSessionCoordinator:
                 account_id=account_id,
                 model=model,
                 service_tier=service_tier,
+                proxy_fingerprint=proxy_fingerprint,
                 latest_turn_state=latest_turn_state,
                 latest_response_id=latest_response_id,
                 allow_takeover=allow_takeover,
@@ -138,6 +141,7 @@ class DurableBridgeSessionCoordinator:
         latest_response_id: str | None = None,
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
+        proxy_fingerprint: str | None = None,
         state: HttpBridgeSessionState | None = None,
     ) -> DurableBridgeLookup | None:
         del api_key_id
@@ -151,6 +155,7 @@ class DurableBridgeSessionCoordinator:
                 latest_response_id=latest_response_id,
                 latest_input_item_count=latest_input_item_count,
                 latest_input_full_fingerprint=latest_input_full_fingerprint,
+                proxy_fingerprint=proxy_fingerprint,
                 state=state,
             )
         if snapshot is None:
@@ -270,6 +275,7 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         canonical_key=snapshot.session_key_value,
         api_key_scope=snapshot.api_key_scope,
         account_id=snapshot.account_id,
+        proxy_fingerprint=snapshot.proxy_fingerprint,
         owner_instance_id=snapshot.owner_instance_id,
         owner_epoch=snapshot.owner_epoch,
         lease_expires_at=snapshot.lease_expires_at,

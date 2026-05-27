@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
+from typing import List, Literal
 
 from pydantic import Field
 
@@ -91,6 +91,14 @@ class AccountSummary(DashboardModel):
     auth: AccountAuthStatus | None = None
     limit_warmup_enabled: bool = False
     limit_warmup: AccountLimitWarmupStatus | None = None
+    proxy_id: str | None = None
+    proxy_display_name: str | None = None
+    proxy_redacted_url: str | None = None
+    proxy_status: str | None = None
+    proxy_availability: Literal["direct", "warning", "available", "unavailable"] = "direct"
+    proxy_availability_reason: str = "none"
+    proxy_last_tested_at: datetime | None = None
+    proxy_last_test_error: str | None = None
 
 
 class AccountsResponse(DashboardModel):
@@ -147,3 +155,12 @@ class AccountAliasRequest(DashboardModel):
 class AccountAliasResponse(DashboardModel):
     account_id: str
     alias: str | None = None
+
+
+class AccountProxyAssignmentRequest(DashboardModel):
+    proxy_id: str | None = None
+
+
+class AccountProxyAssignmentResponse(DashboardModel):
+    status: str
+    proxy_id: str | None = None

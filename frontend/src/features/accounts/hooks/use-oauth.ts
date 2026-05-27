@@ -73,13 +73,13 @@ export function useOauth() {
     }
   }, [state.flowId]);
 
-  const start = useCallback(async (forceMethod?: "browser" | "device") => {
+  const start = useCallback(async (forceMethod?: "browser" | "device", proxyId?: string | null) => {
     clearPollTimer();
     clearCountdownTimer();
     setState((prev) => ({ ...prev, status: "starting", errorMessage: null }));
 
     try {
-      const response = await startOauth({ forceMethod });
+      const response = await startOauth({ forceMethod, proxyId });
       const nextState = OAuthStateSchema.parse({
         flowId: response.flowId ?? null,
         status: "pending",

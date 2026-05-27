@@ -36,6 +36,7 @@ from app.core.auth.refresh import (
 from app.core.balancer import PERMANENT_FAILURE_CODES, RoutingStrategy, failover_decision
 from app.core.balancer.rendezvous_hash import select_node
 from app.core.balancer.types import ClassifiedFailure, UpstreamError
+from app.core.clients import account_proxy
 from app.core.clients.files import FileProxyError, pop_files_timeout_overrides, push_files_timeout_overrides
 from app.core.clients.files import create_file as core_create_file
 from app.core.clients.files import finalize_file as core_finalize_file
@@ -44,7 +45,7 @@ from app.core.clients.proxy import (
     CodexControlResponse,
     ImageFetchSession,
     ProxyResponseError,
-    _as_image_fetch_session,
+    _image_fetch_session,
     _inline_content_images,
     _inline_input_image_urls,
     _ws_transport_payload_budget_bytes,
@@ -1996,7 +1997,13 @@ class ProxyService:
                     )
                 create_lease = await self._get_work_admission().acquire_response_create(compact=True)
                 try:
-                    return await core_compact_responses(payload, filtered, access_token, account_id)
+                    return await _core_compact_responses_compatible(
+                        payload,
+                        filtered,
+                        access_token,
+                        account_id,
+                        local_account_id=target.id,
+                    )
                 finally:
                     create_lease.release()
                     pop_compact_timeout_overrides(timeout_tokens)
@@ -2357,7 +2364,7 @@ class ProxyService:
                         target.id,
                     )
                     _raise_proxy_budget_exhausted()
-                return await core_thread_goal_request(
+                return await _core_thread_goal_request_compatible(
                     operation,
                     payload,
                     filtered,
@@ -2365,6 +2372,7 @@ class ProxyService:
                     upstream_account_id,
                     method=method,
                     timeout_seconds=remaining_budget,
+                    local_account_id=target.id,
                 )
 
             try:
@@ -2568,7 +2576,7 @@ class ProxyService:
                         target.id,
                     )
                     _raise_proxy_budget_exhausted()
-                return await core_codex_control_request(
+                return await _core_codex_control_request_compatible(
                     path,
                     method=method,
                     payload=payload,
@@ -2577,6 +2585,7 @@ class ProxyService:
                     access_token=access_token,
                     account_id=upstream_account_id,
                     timeout_seconds=remaining_budget,
+                    local_account_id=target.id,
                 )
 
             try:
@@ -2765,7 +2774,7 @@ class ProxyService:
                     total_timeout_seconds=remaining_budget,
                 )
                 try:
-                    return await core_transcribe_audio(
+                    return await _core_transcribe_audio_compatible(
                         audio_bytes,
                         filename=filename,
                         content_type=content_type,
@@ -2773,6 +2782,7 @@ class ProxyService:
                         headers=filtered,
                         access_token=access_token,
                         account_id=account_id,
+                        local_account_id=target.id,
                     )
                 finally:
                     pop_transcribe_timeout_overrides(timeout_tokens)
@@ -3082,11 +3092,12 @@ class ProxyService:
             kind="files-create",
             api_key=api_key,
             headers=headers,
-            invoke=lambda access_token, upstream_account_id, filtered_headers: core_create_file(
+            invoke=lambda access_token, upstream_account_id, filtered_headers, local_account_id: core_create_file(
                 payload=payload,
                 headers=filtered_headers,
                 access_token=access_token,
                 account_id=upstream_account_id,
+                local_account_id=local_account_id,
             ),
         )
         # Best-effort pin so finalize lands on the same account.
@@ -3124,11 +3135,12 @@ class ProxyService:
             api_key=api_key,
             headers=headers,
             preferred_account_id=pinned_account_id,
-            invoke=lambda access_token, upstream_account_id, filtered_headers: core_finalize_file(
+            invoke=lambda access_token, upstream_account_id, filtered_headers, local_account_id: core_finalize_file(
                 file_id=file_id,
                 headers=filtered_headers,
                 access_token=access_token,
                 account_id=upstream_account_id,
+                local_account_id=local_account_id,
             ),
         )
         if isinstance(result, dict) and account_id:
@@ -3144,7 +3156,7 @@ class ProxyService:
         kind: str,
         api_key: ApiKeyData | None,
         headers: Mapping[str, str],
-        invoke: Callable[[str, str | None, Mapping[str, str]], Awaitable[dict[str, JsonValue]]],
+        invoke: Callable[[str, str | None, Mapping[str, str], str], Awaitable[dict[str, JsonValue]]],
         preferred_account_id: str | None = None,
     ) -> tuple[dict[str, JsonValue], str | None]:
         """Shared account-selection / refresh / 401-retry plumbing for `/files` calls.
@@ -3213,7 +3225,7 @@ class ProxyService:
                     total_timeout_seconds=remaining_budget,
                 )
                 try:
-                    return await invoke(access_token, account_id, filtered)
+                    return await invoke(access_token, account_id, filtered, target.id)
                 except FileProxyError as files_exc:
                     raise ProxyResponseError(files_exc.status_code, files_exc.payload) from files_exc
                 finally:
@@ -3367,6 +3379,7 @@ class ProxyService:
         upstream: UpstreamResponsesWebSocket | None = None
         upstream_reader: asyncio.Task[None] | None = None
         upstream_control: _WebSocketUpstreamControl | None = None
+        upstream_proxy_fingerprint: str | None = None
         continuity_state = self._websocket_continuity_state_for_request(
             headers,
             api_key=api_key,
@@ -3395,6 +3408,7 @@ class ProxyService:
                             logger.debug("Failed to close upstream websocket", exc_info=True)
                     upstream = None
                     account = None
+                    upstream_proxy_fingerprint = None
 
                 text_data: str | None = None
                 bytes_data: bytes | None = None
@@ -3598,6 +3612,7 @@ class ProxyService:
                             logger.debug("Failed to close upstream websocket", exc_info=True)
                     upstream = None
                     account = None
+                    upstream_proxy_fingerprint = None
 
                 if (
                     request_state is not None
@@ -3617,6 +3632,7 @@ class ProxyService:
                             logger.debug("Failed to close upstream websocket", exc_info=True)
                     upstream = None
                     account = None
+                    upstream_proxy_fingerprint = None
 
                 if (
                     request_state is not None
@@ -3784,12 +3800,38 @@ class ProxyService:
                         websocket=websocket,
                     )
                     if upstream is None or account is None:
+                        upstream_proxy_fingerprint = None
                         self._cancel_request_state_api_key_reservation_heartbeat(request_state)
                         if request_state_registered:
                             async with pending_lock:
                                 if request_state in pending_requests:
                                     pending_requests.remove(request_state)
                             _release_websocket_response_create_gate(request_state, response_create_gate)
+                        continue
+                    try:
+                        upstream_proxy_fingerprint = await _resolve_account_transport_fingerprint(account.id)
+                    except ProxyResponseError:
+                        await self._fail_pending_websocket_requests(
+                            account=account,
+                            account_id_value=account.id,
+                            pending_requests=pending_requests,
+                            pending_lock=pending_lock,
+                            error_code="upstream_unavailable",
+                            error_message="Upstream websocket transport changed; retry on a fresh session",
+                            api_key=api_key,
+                            websocket=websocket,
+                            client_send_lock=client_send_lock,
+                            response_create_gate=response_create_gate,
+                            downstream_activity=downstream_activity,
+                            penalize_account=False,
+                        )
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            logger.debug("Failed to close stale upstream websocket", exc_info=True)
+                        upstream = None
+                        account = None
+                        upstream_proxy_fingerprint = None
                         continue
                     upstream_turn_state = _upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
@@ -3814,6 +3856,41 @@ class ProxyService:
                     )
 
                 try:
+                    if (
+                        account is not None
+                        and upstream is not None
+                        and upstream_proxy_fingerprint is not None
+                        and not await _websocket_upstream_matches_current_transport(
+                            account.id,
+                            upstream_proxy_fingerprint,
+                        )
+                    ):
+                        await self._fail_pending_websocket_requests(
+                            account=account,
+                            account_id_value=account.id,
+                            pending_requests=pending_requests,
+                            pending_lock=pending_lock,
+                            error_code="upstream_unavailable",
+                            error_message="Upstream websocket transport changed; retry on a fresh session",
+                            api_key=api_key,
+                            websocket=websocket,
+                            client_send_lock=client_send_lock,
+                            response_create_gate=response_create_gate,
+                            downstream_activity=downstream_activity,
+                            penalize_account=False,
+                        )
+                        if upstream_reader is not None:
+                            await _await_cancelled_task(upstream_reader, label="proxy websocket upstream reader")
+                            upstream_reader = None
+                        upstream_control = None
+                        try:
+                            await upstream.close()
+                        except Exception:
+                            logger.debug("Failed to close stale upstream websocket", exc_info=True)
+                        upstream = None
+                        account = None
+                        upstream_proxy_fingerprint = None
+                        continue
                     if text_data is not None:
                         await upstream.send_text(text_data)
                     elif bytes_data is not None:
@@ -3843,6 +3920,7 @@ class ProxyService:
                                 )
                         upstream = None
                         account = None
+                        upstream_proxy_fingerprint = None
                         continue
                     await self._fail_pending_websocket_requests(
                         account=account,
@@ -3868,6 +3946,7 @@ class ProxyService:
                             logger.debug("Failed to close upstream websocket after send failure", exc_info=True)
                     upstream = None
                     account = None
+                    upstream_proxy_fingerprint = None
                     continue
         finally:
             if upstream_reader is not None:
@@ -4268,6 +4347,7 @@ class ProxyService:
         self,
         text_data: str,
         request_state: _WebSocketRequestState,
+        local_account_id: str | None = None,
     ) -> str:
         """Inline external ``input_image`` URLs into ``data:`` URLs.
 
@@ -4297,7 +4377,7 @@ class ProxyService:
             return text_data
         connect_timeout = getattr(settings, "upstream_connect_timeout_seconds", 5.0)
         async with lease_http_session() as http_session:
-            image_fetch_session = _as_image_fetch_session(http_session)
+            image_fetch_session = _image_fetch_session(http_session, local_account_id)
             inlined = await _inline_input_image_urls(
                 payload_dict,
                 image_fetch_session,
@@ -4868,7 +4948,12 @@ class ProxyService:
         account_id = _header_account_id(account.chatgpt_account_id)
         connect_lease = await self._get_work_admission().acquire_websocket_connect()
         try:
-            return await connect_responses_websocket(headers, access_token, account_id)
+            return await _connect_responses_websocket_compatible(
+                headers,
+                access_token,
+                account_id,
+                local_account_id=account.id,
+            )
         finally:
             connect_lease.release()
 
@@ -5168,6 +5253,7 @@ class ProxyService:
                                     previous_response_id=previous_response_id,
                                     preferred_account_id=preferred_account_id,
                                 )
+                                and await _http_bridge_session_matches_current_transport(previous_session)
                             ):
                                 key = previous_session.key
                                 self._promote_http_bridge_session_to_codex_affinity(
@@ -5212,6 +5298,7 @@ class ProxyService:
                         previous_response_id=previous_response_id,
                         preferred_account_id=preferred_account_id,
                     )
+                    and await _http_bridge_session_matches_current_transport(existing)
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
@@ -5870,6 +5957,7 @@ class ProxyService:
                         previous_response_id=previous_response_id,
                         preferred_account_id=preferred_account_id,
                     )
+                    and await _http_bridge_session_matches_current_transport(session)
                 ):
                     current_instance = settings.http_responses_session_bridge_instance_id
                     if _durable_bridge_lookup_allows_local_reuse(durable_lookup, current_instance=current_instance):
@@ -5987,6 +6075,30 @@ class ProxyService:
         for session in sessions_to_close:
             await self._close_http_bridge_session(session)
 
+    async def close_http_bridge_sessions_for_account(self, account_id: str) -> None:
+        async with self._http_bridge_lock:
+            sessions_to_close = [
+                session for session in self._http_bridge_sessions.values() if session.account.id == account_id
+            ]
+            for session in sessions_to_close:
+                self._http_bridge_sessions.pop(session.key, None)
+
+        for session in sessions_to_close:
+            await self._close_http_bridge_session(session)
+
+    async def close_http_bridge_sessions_for_proxy(self, proxy_id: str) -> None:
+        async with self._http_bridge_lock:
+            sessions_to_close = [
+                session
+                for session in self._http_bridge_sessions.values()
+                if session.account.proxy_id == proxy_id
+            ]
+            for session in sessions_to_close:
+                self._http_bridge_sessions.pop(session.key, None)
+
+        for session in sessions_to_close:
+            await self._close_http_bridge_session(session)
+
     async def mark_http_bridge_draining(self) -> None:
         try:
             await self._durable_bridge.mark_instance_draining(
@@ -6073,6 +6185,32 @@ class ProxyService:
             model=session.request_model,
             cache_key_family=session.key.affinity_kind,
             model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+
+    async def _ensure_http_bridge_session_transport_current(self, session: "_HTTPBridgeSession") -> None:
+        if await _http_bridge_session_matches_current_transport(session):
+            return
+        _log_http_bridge_event(
+            "transport_changed",
+            session.key,
+            account_id=session.account.id,
+            model=session.request_model,
+            detail=f"stored_proxy_fingerprint={session.proxy_fingerprint}",
+            cache_key_family=session.key.affinity_kind,
+            model_class=_extract_model_class(session.request_model) if session.request_model else None,
+        )
+        async with self._http_bridge_lock:
+            if self._http_bridge_sessions.get(session.key) is session:
+                self._http_bridge_sessions.pop(session.key, None)
+            session.closed = True
+        await self._close_http_bridge_session(session)
+        raise ProxyResponseError(
+            502,
+            openai_error(
+                "upstream_unavailable",
+                "HTTP responses session bridge transport changed; retry on a fresh session",
+                error_type="server_error",
+            ),
         )
 
     async def _register_http_bridge_turn_state(self, session: "_HTTPBridgeSession", turn_state: str) -> None:
@@ -6196,6 +6334,7 @@ class ProxyService:
                 account_id=session.account.id,
                 model=session.request_model,
                 service_tier=None,
+                proxy_fingerprint=session.proxy_fingerprint,
                 latest_turn_state=session.downstream_turn_state,
                 latest_response_id=None,
                 allow_takeover=allow_takeover,
@@ -6262,6 +6401,7 @@ class ProxyService:
                 lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
                 latest_turn_state=session.downstream_turn_state,
                 latest_response_id=None,
+                proxy_fingerprint=session.proxy_fingerprint,
             )
             if lookup is not None:
                 session.durable_owner_epoch = lookup.owner_epoch
@@ -6346,6 +6486,7 @@ class ProxyService:
                     account,
                     timeout_seconds=_remaining_budget_seconds(deadline),
                 )
+                proxy_fingerprint = await _resolve_account_transport_fingerprint(account.id)
                 connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
                 upstream = await self._open_upstream_websocket_with_budget(
                     account,
@@ -6366,6 +6507,7 @@ class ProxyService:
                         force=True,
                         timeout_seconds=_remaining_budget_seconds(deadline),
                     )
+                    proxy_fingerprint = await _resolve_account_transport_fingerprint(account.id)
                     connect_headers = _headers_with_turn_state(headers, _sticky_key_from_turn_state_header(headers))
                     upstream = await self._open_upstream_websocket_with_budget(
                         account,
@@ -6446,6 +6588,7 @@ class ProxyService:
             prewarm_lock=anyio.Lock(),
             upstream_turn_state=_upstream_turn_state_from_socket(upstream),
             downstream_turn_state=None,
+            proxy_fingerprint=proxy_fingerprint,
         )
         session.upstream_reader = asyncio.create_task(self._relay_http_bridge_upstream_messages(session))
         return session
@@ -6479,6 +6622,7 @@ class ProxyService:
                     error_type="server_error",
                 ),
             )
+        await self._ensure_http_bridge_session_transport_current(session)
         if session.closed:
             # Try reconnecting the upstream websocket first.  For requests
             # carrying previous_response_id we only reconnect (send_request=
@@ -6543,7 +6687,7 @@ class ProxyService:
                 )
             session.queued_request_count += 1
         try:
-            text_data = await self._inline_http_bridge_image_urls(text_data, request_state)
+            text_data = await self._inline_http_bridge_image_urls(text_data, request_state, session.account.id)
             self._start_request_state_api_key_reservation_heartbeat(
                 request_state,
                 api_key=request_state.api_key,
@@ -7040,9 +7184,11 @@ class ProxyService:
         request_state: _WebSocketRequestState,
         restart_reader: bool = False,
     ) -> None:
+        await self._ensure_http_bridge_session_transport_current(session)
         old_account_id = session.account.id
         old_upstream = session.upstream
         old_reader = session.upstream_reader if restart_reader else None
+        proxy_fingerprint = session.proxy_fingerprint
         if old_reader is not None:
             if old_reader is not asyncio.current_task():
                 cancelled = await _await_cancelled_task(old_reader, label="http bridge upstream reader")
@@ -7104,6 +7250,7 @@ class ProxyService:
                     account,
                     timeout_seconds=_remaining_budget_seconds(deadline),
                 )
+                proxy_fingerprint = await _resolve_account_transport_fingerprint(account.id)
                 connect_headers = _headers_with_turn_state(
                     session.headers,
                     _preferred_http_bridge_reconnect_turn_state(session),
@@ -7127,6 +7274,7 @@ class ProxyService:
                         force=True,
                         timeout_seconds=_remaining_budget_seconds(deadline),
                     )
+                    proxy_fingerprint = await _resolve_account_transport_fingerprint(account.id)
                     connect_headers = _headers_with_turn_state(
                         session.headers,
                         _preferred_http_bridge_reconnect_turn_state(session),
@@ -7179,6 +7327,7 @@ class ProxyService:
         session.upstream = upstream
         session.upstream_control = _WebSocketUpstreamControl()
         session.closed = False
+        session.proxy_fingerprint = proxy_fingerprint
         session.last_upstream_close_code = None
         session.upstream_turn_state = _upstream_turn_state_from_socket(upstream) or session.upstream_turn_state
         if restart_reader:
@@ -10319,21 +10468,23 @@ class ProxyService:
         try:
             response_create_lease = await self._get_work_admission().acquire_response_create()
             if upstream_stream_transport is not None:
-                stream = core_stream_responses(
+                stream = _core_stream_responses_compatible(
                     payload,
                     headers,
                     access_token,
                     account_id,
                     raise_for_status=True,
                     upstream_stream_transport_override=upstream_stream_transport,
+                    local_account_id=account.id,
                 )
             else:
-                stream = core_stream_responses(
+                stream = _core_stream_responses_compatible(
                     payload,
                     headers,
                     access_token,
                     account_id,
                     raise_for_status=True,
+                    local_account_id=account.id,
                 )
             iterator = stream.__aiter__()
             try:
@@ -11535,6 +11686,7 @@ class _HTTPBridgeSession:
     upstream_reader: asyncio.Task[None] | None = None
     last_upstream_close_code: int | None = None
     closed: bool = False
+    proxy_fingerprint: str = "none"
     seen_tool_call_keys: dict[tuple[str, str, str | None, str | None, str], None] = field(default_factory=dict)
 
 
@@ -13957,6 +14109,109 @@ def _preferred_http_bridge_reconnect_turn_state(session: "_HTTPBridgeSession") -
     return session.upstream_turn_state
 
 
+def _supports_local_account_id(func: object) -> bool:
+    return "local_account_id" in inspect.signature(func).parameters
+
+
+def _core_stream_responses_compatible(
+    payload: ResponsesRequest,
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    *,
+    raise_for_status: bool,
+    local_account_id: str,
+    upstream_stream_transport_override: str | None = None,
+) -> AsyncIterator[str]:
+    kwargs: dict[str, object] = {"raise_for_status": raise_for_status}
+    if upstream_stream_transport_override is not None:
+        kwargs["upstream_stream_transport_override"] = upstream_stream_transport_override
+    if _supports_local_account_id(core_stream_responses):
+        kwargs["local_account_id"] = local_account_id
+    return core_stream_responses(payload, headers, access_token, account_id, **kwargs)
+
+
+async def _core_compact_responses_compatible(
+    payload: ResponsesCompactRequest,
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    *,
+    local_account_id: str,
+) -> CompactResponsePayload:
+    kwargs: dict[str, object] = {}
+    if _supports_local_account_id(core_compact_responses):
+        kwargs["local_account_id"] = local_account_id
+    return await core_compact_responses(payload, headers, access_token, account_id, **kwargs)
+
+
+async def _core_thread_goal_request_compatible(
+    operation: str,
+    payload: Mapping[str, JsonValue],
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    *,
+    method: str,
+    timeout_seconds: float,
+    local_account_id: str,
+) -> dict[str, JsonValue]:
+    kwargs: dict[str, object] = {"method": method, "timeout_seconds": timeout_seconds}
+    if _supports_local_account_id(core_thread_goal_request):
+        kwargs["local_account_id"] = local_account_id
+    return await core_thread_goal_request(operation, payload, headers, access_token, account_id, **kwargs)
+
+
+async def _core_codex_control_request_compatible(
+    path: str,
+    *,
+    method: str,
+    payload: bytes | None,
+    query_params: Mapping[str, str] | Sequence[tuple[str, str]],
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    timeout_seconds: float,
+    local_account_id: str,
+) -> CodexControlResponse:
+    kwargs: dict[str, object] = {
+        "method": method,
+        "payload": payload,
+        "query_params": query_params,
+        "headers": headers,
+        "access_token": access_token,
+        "account_id": account_id,
+        "timeout_seconds": timeout_seconds,
+    }
+    if _supports_local_account_id(core_codex_control_request):
+        kwargs["local_account_id"] = local_account_id
+    return await core_codex_control_request(path, **kwargs)
+
+
+async def _core_transcribe_audio_compatible(
+    audio_bytes: bytes,
+    *,
+    filename: str,
+    content_type: str | None,
+    prompt: str | None,
+    headers: Mapping[str, str],
+    access_token: str,
+    account_id: str | None,
+    local_account_id: str,
+) -> dict[str, JsonValue]:
+    kwargs: dict[str, object] = {
+        "filename": filename,
+        "content_type": content_type,
+        "prompt": prompt,
+        "headers": headers,
+        "access_token": access_token,
+        "account_id": account_id,
+    }
+    if _supports_local_account_id(core_transcribe_audio):
+        kwargs["local_account_id"] = local_account_id
+    return await core_transcribe_audio(audio_bytes, **kwargs)
+
+
 def _http_bridge_turn_state_alias_key(turn_state: str, api_key_id: str | None) -> tuple[str, str | None]:
     return (turn_state, api_key_id)
 
@@ -13998,6 +14253,50 @@ def _http_bridge_session_matches_preferred_account(
     if previous_response_id is None or preferred_account_id is None:
         return True
     return session.account.id == preferred_account_id
+
+
+async def _connect_responses_websocket_compatible(
+    headers: dict[str, str],
+    access_token: str,
+    account_id: str | None,
+    *,
+    local_account_id: str,
+) -> UpstreamResponsesWebSocket:
+    signature = inspect.signature(connect_responses_websocket)
+    if "local_account_id" in signature.parameters:
+        return await connect_responses_websocket(
+            headers,
+            access_token,
+            account_id,
+            local_account_id=local_account_id,
+        )
+    return await connect_responses_websocket(headers, access_token, account_id)
+
+
+async def _resolve_account_transport_fingerprint(account_id: str) -> str:
+    try:
+        return (await account_proxy.resolve_transport(account_id)).proxy_fingerprint
+    except account_proxy.AccountProxyTransportError as exc:
+        raise ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", exc.message, error_type="server_error"),
+        ) from exc
+
+
+async def _http_bridge_session_matches_current_transport(session: "_HTTPBridgeSession") -> bool:
+    try:
+        current_fingerprint = await _resolve_account_transport_fingerprint(session.account.id)
+    except ProxyResponseError:
+        return False
+    return session.proxy_fingerprint == current_fingerprint
+
+
+async def _websocket_upstream_matches_current_transport(account_id: str, proxy_fingerprint: str) -> bool:
+    try:
+        current_fingerprint = await _resolve_account_transport_fingerprint(account_id)
+    except ProxyResponseError:
+        return False
+    return proxy_fingerprint == current_fingerprint
 
 
 def _make_http_bridge_session_key(

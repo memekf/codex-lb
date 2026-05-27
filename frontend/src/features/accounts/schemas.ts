@@ -79,6 +79,14 @@ export const AccountSummarySchema = z.object({
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   limitWarmupEnabled: z.boolean().default(false),
   limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),
+  proxyId: z.string().nullable().optional(),
+  proxyDisplayName: z.string().nullable().optional(),
+  proxyRedactedUrl: z.string().nullable().optional(),
+  proxyStatus: z.string().nullable().optional(),
+  proxyAvailability: z.enum(["direct", "warning", "available", "unavailable"]).or(z.string()).optional(),
+  proxyAvailabilityReason: z.string().optional(),
+  proxyLastTestedAt: z.string().datetime({ offset: true }).nullable().optional(),
+  proxyLastTestError: z.string().nullable().optional(),
 });
 
 export const AccountTrendsResponseSchema = z.object({
@@ -121,6 +129,15 @@ export const AccountLimitWarmupUpdateResponseSchema = z.object({
   enabled: z.boolean(),
 });
 
+export const AccountProxyAssignmentRequestSchema = z.object({
+  proxyId: z.string().nullable(),
+});
+
+export const AccountProxyAssignmentResponseSchema = z.object({
+  status: z.string(),
+  proxyId: z.string().nullable(),
+});
+
 export const AccountExportResponseSchema = z.object({
   accountId: z.string(),
   email: z.string(),
@@ -131,6 +148,7 @@ export const AccountExportResponseSchema = z.object({
 
 export const OauthStartRequestSchema = z.object({
   forceMethod: z.string().optional(),
+  proxyId: z.string().nullable().optional(),
 });
 
 export const OauthStartResponseSchema = z.object({

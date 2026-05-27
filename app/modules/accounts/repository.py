@@ -7,6 +7,7 @@ from datetime import datetime
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings, RequestLog, StickySession, UsageHistory
@@ -42,7 +43,7 @@ class AccountsRepository:
         return await self._session.get(Account, account_id)
 
     async def list_accounts(self, *, refresh_existing: bool = False) -> list[Account]:
-        stmt = select(Account).order_by(Account.email)
+        stmt = select(Account).options(selectinload(Account.proxy)).order_by(Account.email)
         if refresh_existing:
             stmt = stmt.execution_options(populate_existing=True)
         result = await self._session.execute(stmt)
@@ -94,16 +95,23 @@ class AccountsRepository:
 
         return summaries
 
-    async def exists_active_chatgpt_account_id(self, chatgpt_account_id: str) -> bool:
+    async def get_active_local_account_id_by_chatgpt_account_id(self, chatgpt_account_id: str) -> str | None:
         result = await self._session.execute(
             select(Account.id)
             .where(Account.chatgpt_account_id == chatgpt_account_id)
             .where(Account.status.notin_((AccountStatus.DEACTIVATED, AccountStatus.PAUSED)))
+            .order_by(Account.id)
             .limit(1)
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalar_one_or_none()
 
-    async def upsert(self, account: Account, *, merge_by_email: bool | None = None) -> Account:
+    async def upsert(
+        self,
+        account: Account,
+        *,
+        merge_by_email: bool | None = None,
+        replace_proxy_id: bool = False,
+    ) -> Account:
         dialect_name = self._dialect_name()
         sqlite_lock_acquired = False
         if merge_by_email is None:
@@ -126,7 +134,7 @@ class AccountsRepository:
         existing = await self._session.get(Account, account.id)
         if existing:
             if merge_by_email:
-                _apply_account_updates(existing, account)
+                _apply_account_updates(existing, account, replace_proxy_id=replace_proxy_id)
                 await self._session.commit()
                 await self._session.refresh(existing)
                 return existing
@@ -135,7 +143,7 @@ class AccountsRepository:
         if merge_by_email:
             existing_by_email = await self._single_account_by_email(account.email)
             if existing_by_email:
-                _apply_account_updates(existing_by_email, account)
+                _apply_account_updates(existing_by_email, account, replace_proxy_id=replace_proxy_id)
                 await self._session.commit()
                 await self._session.refresh(existing_by_email)
                 return existing_by_email
@@ -213,6 +221,13 @@ class AccountsRepository:
     async def update_alias(self, account_id: str, alias: str | None) -> bool:
         result = await self._session.execute(
             update(Account).where(Account.id == account_id).values(alias=alias).returning(Account.id)
+        )
+        await self._session.commit()
+        return result.scalar_one_or_none() is not None
+
+    async def update_proxy_id(self, account_id: str, proxy_id: str | None) -> bool:
+        result = await self._session.execute(
+            update(Account).where(Account.id == account_id).values(proxy_id=proxy_id).returning(Account.id)
         )
         await self._session.commit()
         return result.scalar_one_or_none() is not None
@@ -317,7 +332,7 @@ class AccountsRepository:
         )
 
 
-def _apply_account_updates(target: Account, source: Account) -> None:
+def _apply_account_updates(target: Account, source: Account, *, replace_proxy_id: bool = False) -> None:
     target.chatgpt_account_id = source.chatgpt_account_id
     target.email = source.email
     target.plan_type = source.plan_type
@@ -329,6 +344,8 @@ def _apply_account_updates(target: Account, source: Account) -> None:
     target.deactivation_reason = source.deactivation_reason
     target.reset_at = source.reset_at
     target.blocked_at = source.blocked_at
+    if replace_proxy_id or source.proxy_id is not None:
+        target.proxy_id = source.proxy_id
 
 
 def _advisory_lock_key(scope: str, value: str) -> int:

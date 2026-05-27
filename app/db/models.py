@@ -48,6 +48,44 @@ class StickySessionKind(str, Enum):
     PROMPT_CACHE = "prompt_cache"
 
 
+class AccountProxyStatus(str, Enum):
+    UNTESTED = "untested"
+    TESTING = "testing"
+    WORKING = "working"
+    FAILED = "failed"
+
+
+class AccountProxy(Base):
+    __tablename__ = "account_proxies"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    proxy_url_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    status: Mapped[AccountProxyStatus] = mapped_column(
+        SqlEnum(
+            AccountProxyStatus,
+            name="account_proxy_status",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        default=AccountProxyStatus.UNTESTED,
+        server_default=text("'untested'"),
+        nullable=False,
+    )
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_test_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_test_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    accounts: Mapped[list["Account"]] = relationship("Account", back_populates="proxy")
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -77,6 +115,11 @@ class Account(Base):
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     reset_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     blocked_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxy_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("account_proxies.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     limit_warmup_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -98,6 +141,7 @@ class Account(Base):
         back_populates="account",
         cascade="all, delete-orphan",
     )
+    proxy: Mapped[AccountProxy | None] = relationship("AccountProxy", back_populates="accounts")
 
 
 class UsageHistory(Base):
@@ -611,6 +655,7 @@ class HttpBridgeSessionRecord(Base):
     )
     model: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    proxy_fingerprint: Mapped[str | None] = mapped_column(String(128), nullable=True)
     latest_turn_state: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_response_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     latest_input_item_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -711,6 +756,8 @@ Index(
     UsageHistory.recorded_at.desc(),
     UsageHistory.id.desc(),
 )
+Index("idx_account_proxies_status", AccountProxy.status)
+Index("idx_accounts_proxy_id", Account.proxy_id)
 Index("idx_accounts_email", Account.email)
 Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)

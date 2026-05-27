@@ -6,6 +6,7 @@ from typing import cast
 
 import aiohttp
 
+from app.core.clients import account_proxy
 from app.core.clients.codex_version import get_codex_version_cache
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
@@ -97,6 +98,7 @@ def _parse_upstream_model(data: dict[str, JsonValue]) -> UpstreamModel:
 async def fetch_models_for_plan(
     access_token: str,
     account_id: str | None,
+    local_account_id: str | None = None,
 ) -> list[UpstreamModel]:
     settings = get_settings()
     upstream_base = settings.upstream_base_url.rstrip("/")
@@ -113,7 +115,12 @@ async def fetch_models_for_plan(
     timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
     try:
         async with lease_http_session() as session:
-            async with session.get(url, headers=headers, timeout=timeout) as resp:
+            request_context = (
+                account_proxy.get(local_account_id, url, session=session, headers=headers, timeout=timeout)
+                if local_account_id is not None
+                else session.get(url, headers=headers, timeout=timeout)
+            )
+            async with request_context as resp:
                 if resp.status >= 400:
                     text = await resp.text()
                     raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
@@ -121,6 +128,8 @@ async def fetch_models_for_plan(
                 data = await resp.json(content_type=None)
     except ModelFetchError:
         raise
+    except account_proxy.AccountProxyTransportError as exc:
+        raise ModelFetchError(503, account_proxy.redact_transport_error(exc)) from exc
     except asyncio.TimeoutError as exc:
         raise ModelFetchError(504, "Upstream models API timed out", transport_error=True) from exc
     except (aiohttp.ClientError, OSError) as exc:

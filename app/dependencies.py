@@ -9,6 +9,8 @@ from fastapi import Depends, FastAPI, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_background_session, get_session
+from app.modules.account_proxies.repository import AccountProxyRepository
+from app.modules.account_proxies.service import AccountProxyService
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.service import AccountsService
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -26,7 +28,7 @@ from app.modules.dashboard_auth.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
-from app.modules.oauth.service import OauthService
+from app.modules.oauth.service import OAuthRepositories, OauthService
 from app.modules.proxy.repo_bundle import ProxyRepositories
 from app.modules.proxy.service import ProxyService
 from app.modules.proxy.sticky_repository import StickySessionsRepository
@@ -44,6 +46,13 @@ class AccountsContext:
     session: AsyncSession
     repository: AccountsRepository
     service: AccountsService
+
+
+@dataclass(slots=True)
+class AccountProxiesContext:
+    session: AsyncSession
+    repository: AccountProxyRepository
+    service: AccountProxyService
 
 
 @dataclass(slots=True)
@@ -127,12 +136,27 @@ def get_accounts_context(
     usage_repository = UsageRepository(session)
     additional_usage_repository = AdditionalUsageRepository(session)
     limit_warmup_repository = LimitWarmupRepository(session)
-    service = AccountsService(repository, usage_repository, additional_usage_repository, limit_warmup_repository)
+    account_proxy_repository = AccountProxyRepository(session)
+    service = AccountsService(
+        repository,
+        usage_repository,
+        additional_usage_repository,
+        limit_warmup_repository,
+        account_proxy_repository,
+    )
     return AccountsContext(
         session=session,
         repository=repository,
         service=service,
     )
+
+
+def get_account_proxies_context(
+    session: AsyncSession = Depends(get_session),
+) -> AccountProxiesContext:
+    repository = AccountProxyRepository(session)
+    service = AccountProxyService(repository)
+    return AccountProxiesContext(session=session, repository=repository, service=service)
 
 
 def get_audit_context(
@@ -162,9 +186,12 @@ def get_usage_context(
 
 
 @asynccontextmanager
-async def _accounts_repo_context() -> AsyncIterator[AccountsRepository]:
+async def _oauth_repo_context() -> AsyncIterator[OAuthRepositories]:
     async with get_background_session() as session:
-        yield AccountsRepository(session)
+        yield OAuthRepositories(
+            accounts=AccountsRepository(session),
+            account_proxies=AccountProxyRepository(session),
+        )
 
 
 @asynccontextmanager
@@ -184,7 +211,14 @@ def get_oauth_context(
     session: AsyncSession = Depends(get_session),
 ) -> OauthContext:
     accounts_repository = AccountsRepository(session)
-    return OauthContext(service=OauthService(accounts_repository, repo_factory=_accounts_repo_context))
+    account_proxy_repository = AccountProxyRepository(session)
+    return OauthContext(
+        service=OauthService(
+            accounts_repository,
+            account_proxy_repository,
+            repo_factory=_oauth_repo_context,
+        )
+    )
 
 
 def get_dashboard_auth_context(

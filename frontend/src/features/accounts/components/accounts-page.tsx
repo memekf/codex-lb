@@ -12,6 +12,7 @@ import { ImportDialog } from "@/features/accounts/components/import-dialog";
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { sortAccountsForDisplay } from "@/features/accounts/sorting";
 import { useOauth } from "@/features/accounts/hooks/use-oauth";
+import { useProxies } from "@/features/proxies/hooks/use-proxies";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { buildDuplicateAccountIdSet } from "@/utils/account-identifiers";
 import { getErrorMessageOrNull } from "@/utils/errors";
@@ -31,8 +32,10 @@ export function AccountsPage() {
     deleteMutation,
     exportMutation,
     limitWarmupMutation,
+    setProxyMutation,
   } = useAccounts();
   const oauth = useOauth();
+  const { proxiesQuery } = useProxies();
 
   const importDialog = useDialogState();
   const oauthDialog = useDialogState();
@@ -75,7 +78,8 @@ export function AccountsPage() {
     setAliasMutation.isPending ||
     deleteMutation.isPending ||
     exportMutation.isPending ||
-    limitWarmupMutation.isPending;
+    limitWarmupMutation.isPending ||
+    setProxyMutation.isPending;
 
   const mutationError =
     getErrorMessageOrNull(importMutation.error) ||
@@ -84,7 +88,8 @@ export function AccountsPage() {
     getErrorMessageOrNull(setAliasMutation.error) ||
     getErrorMessageOrNull(deleteMutation.error) ||
     getErrorMessageOrNull(exportMutation.error) ||
-    getErrorMessageOrNull(limitWarmupMutation.error);
+    getErrorMessageOrNull(limitWarmupMutation.error) ||
+    getErrorMessageOrNull(setProxyMutation.error);
 
   return (
     <div className="animate-fade-in-up space-y-6">
@@ -125,6 +130,8 @@ export function AccountsPage() {
             onLimitWarmupChange={(accountId, enabled) =>
               void limitWarmupMutation.mutateAsync({ accountId, enabled })
             }
+            proxies={proxiesQuery.data ?? []}
+            onSetProxy={(accountId, proxyId) => void setProxyMutation.mutateAsync({ accountId, proxyId })}
           />
         </div>
       )}
@@ -144,8 +151,8 @@ export function AccountsPage() {
           open={oauthDialog.open}
           state={oauth.state}
           onOpenChange={oauthDialog.onOpenChange}
-          onStart={async (method) => {
-            await oauth.start(method);
+          onStart={async (method, proxyId) => {
+            await oauth.start(method, proxyId);
           }}
           onComplete={async () => {
             await oauth.complete();
@@ -155,6 +162,8 @@ export function AccountsPage() {
             await oauth.manualCallback(callbackUrl);
           }}
           onReset={oauth.reset}
+          proxies={proxiesQuery.data ?? []}
+          currentProxyId={selectedAccount?.proxyId ?? null}
         />
       </Suspense>
 

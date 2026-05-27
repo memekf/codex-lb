@@ -6,6 +6,9 @@ import json
 import pytest
 
 from app.core.auth import generate_unique_account_id, parse_auth_json
+from app.core.utils.time import utcnow
+from app.db.models import AccountProxy, AccountProxyStatus
+from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
 
@@ -47,6 +50,13 @@ async def test_import_and_list_accounts(async_client):
     assert list_response.status_code == 200
     accounts = list_response.json()["accounts"]
     assert any(account["accountId"] == expected_account_id for account in accounts)
+    matched = next(account for account in accounts if account["accountId"] == expected_account_id)
+    assert matched["proxyId"] is None
+    assert matched["proxyDisplayName"] is None
+    assert matched["proxyRedactedUrl"] is None
+    assert matched["proxyStatus"] is None
+    assert matched["proxyAvailability"] == "direct"
+    assert matched["proxyAvailabilityReason"] == "none"
 
 
 @pytest.mark.asyncio
@@ -230,6 +240,173 @@ async def test_set_and_clear_account_alias(async_client):
     matched = next(a for a in listing.json()["accounts"] if a["accountId"] == expected_account_id)
     assert matched["alias"] is None
     assert matched["displayName"] == email
+
+
+@pytest.mark.asyncio
+async def test_set_and_clear_account_proxy_assignment(async_client):
+    email = "proxy-assignment@example.com"
+    raw_account_id = "acc_proxy_assignment"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    proxy = await async_client.post(
+        "/api/proxies",
+        json={"displayName": "Primary egress", "proxyUrl": "https://user:secret@example.com:8443"},
+    )
+    assert proxy.status_code == 200
+    proxy_id = proxy.json()["id"]
+
+    assigned = await async_client.put(f"/api/accounts/{expected_account_id}/proxy", json={"proxyId": proxy_id})
+    assert assigned.status_code == 200
+    assert assigned.json() == {"status": "updated", "proxyId": proxy_id}
+
+    listing = await async_client.get("/api/accounts")
+    matched = next(account for account in listing.json()["accounts"] if account["accountId"] == expected_account_id)
+    assert matched["proxyId"] == proxy_id
+    assert matched["proxyDisplayName"] == "Primary egress"
+    assert matched["proxyRedactedUrl"] == "https://***:***@example.com:8443"
+    assert matched["proxyStatus"] == "untested"
+    assert matched["proxyAvailability"] == "warning"
+    assert matched["proxyAvailabilityReason"] == "proxy_untested"
+
+    async with SessionLocal() as session:
+        row = await session.get(AccountProxy, proxy_id)
+        assert row is not None
+        row.status = AccountProxyStatus.TESTING
+        row.last_tested_at = utcnow()
+        row.last_test_error = "previous failure"
+        await session.commit()
+
+    listing = await async_client.get("/api/accounts")
+    matched = next(account for account in listing.json()["accounts"] if account["accountId"] == expected_account_id)
+    assert matched["proxyStatus"] == "testing"
+    assert matched["proxyAvailability"] == "unavailable"
+    assert matched["proxyAvailabilityReason"] == "proxy_failed"
+
+    delete_assigned = await async_client.delete(f"/api/proxies/{proxy_id}")
+    assert delete_assigned.status_code == 409
+    assert delete_assigned.json()["error"]["code"] == "proxy_in_use"
+
+    cleared = await async_client.put(f"/api/accounts/{expected_account_id}/proxy", json={"proxyId": None})
+    assert cleared.status_code == 200
+    assert cleared.json() == {"status": "updated", "proxyId": None}
+
+    listing = await async_client.get("/api/accounts")
+    matched = next(account for account in listing.json()["accounts"] if account["accountId"] == expected_account_id)
+    assert matched["proxyId"] is None
+    assert matched["proxyAvailability"] == "direct"
+    assert matched["proxyAvailabilityReason"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_set_account_proxy_rejects_missing_proxy(async_client):
+    email = "missing-proxy@example.com"
+    raw_account_id = "acc_missing_proxy"
+    payload = {
+        "email": email,
+        "chatgpt_account_id": raw_account_id,
+        "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+    }
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(payload),
+            "accessToken": "access",
+            "refreshToken": "refresh",
+            "accountId": raw_account_id,
+        },
+    }
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    response = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert response.status_code == 200
+
+    missing = await async_client.put(f"/api/accounts/{expected_account_id}/proxy", json={"proxyId": "missing"})
+    assert missing.status_code == 404
+    assert missing.json()["error"]["code"] == "proxy_not_found"
+
+
+@pytest.mark.asyncio
+async def test_reimport_preserves_proxy_assignment_and_export_is_proxy_free(async_client):
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "importWithoutOverwrite": False,
+            "totpRequiredOnLogin": False,
+        },
+    )
+    assert settings.status_code == 200
+
+    email = "proxy-preserve@example.com"
+    raw_account_id = "acc_proxy_preserve"
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    auth_json = {
+        "tokens": {
+            "idToken": _encode_jwt(
+                {
+                    "email": email,
+                    "chatgpt_account_id": raw_account_id,
+                    "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+                }
+            ),
+            "accessToken": "access-one",
+            "refreshToken": "refresh-one",
+            "accountId": raw_account_id,
+        },
+    }
+    imported = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert imported.status_code == 200
+
+    proxy = await async_client.post(
+        "/api/proxies",
+        json={"displayName": "Primary egress", "proxyUrl": "https://user:secret@example.com:8443"},
+    )
+    proxy_id = proxy.json()["id"]
+    assigned = await async_client.put(f"/api/accounts/{expected_account_id}/proxy", json={"proxyId": proxy_id})
+    assert assigned.status_code == 200
+
+    auth_json["tokens"]["accessToken"] = "access-two"
+    reimported = await async_client.post(
+        "/api/accounts/import",
+        files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
+    )
+    assert reimported.status_code == 200
+    assert reimported.json()["accountId"] == expected_account_id
+
+    listing = await async_client.get("/api/accounts")
+    matched = next(account for account in listing.json()["accounts"] if account["accountId"] == expected_account_id)
+    assert matched["proxyId"] == proxy_id
+
+    exported = await async_client.post(f"/api/accounts/{expected_account_id}/export")
+    assert exported.status_code == 200
+    exported_auth = json.loads(exported.json()["authJson"])
+    assert "proxyId" not in exported_auth
+    assert "proxy_id" not in exported_auth
+    assert "proxyUrl" not in exported_auth
+    assert "proxy_url" not in exported_auth
 
     # Setting an alias updates both `alias` and `displayName`.
     set_response = await async_client.put(

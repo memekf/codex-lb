@@ -92,6 +92,7 @@ async def exchange_authorization_code(
     client_id: str | None = None,
     timeout_seconds: float | None = None,
     session: aiohttp.ClientSession | None = None,
+    proxy_url: str | None = None,
 ) -> OAuthTokens:
     settings = get_settings()
     url = f"{(base_url or settings.auth_base_url).rstrip('/')}/oauth/token"
@@ -115,6 +116,7 @@ async def exchange_authorization_code(
             data=encoded,
             headers=headers,
             timeout=timeout,
+            proxy=proxy_url,
         ) as resp:
             data = await _safe_json(resp)
             try:
@@ -142,6 +144,7 @@ async def request_device_code(
     client_id: str | None = None,
     timeout_seconds: float | None = None,
     session: aiohttp.ClientSession | None = None,
+    proxy_url: str | None = None,
 ) -> DeviceCode:
     settings = get_settings()
     auth_base = (base_url or settings.auth_base_url).rstrip("/")
@@ -156,7 +159,7 @@ async def request_device_code(
     if request_id:
         headers["x-request-id"] = request_id
     async with lease_http_session(session) as client_session:
-        async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+        async with client_session.post(url, json=payload, headers=headers, timeout=timeout, proxy=proxy_url) as resp:
             data = await _safe_json(resp)
             if resp.status >= 400:
                 if resp.status == 404:
@@ -213,6 +216,7 @@ async def exchange_device_token(
     base_url: str | None = None,
     timeout_seconds: float | None = None,
     session: aiohttp.ClientSession | None = None,
+    proxy_url: str | None = None,
 ) -> OAuthTokens | None:
     settings = get_settings()
     url = f"{(base_url or settings.auth_base_url).rstrip('/')}/api/accounts/deviceauth/token"
@@ -224,7 +228,7 @@ async def exchange_device_token(
     if request_id:
         headers["x-request-id"] = request_id
     async with lease_http_session(session) as client_session:
-        async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+        async with client_session.post(url, json=payload, headers=headers, timeout=timeout, proxy=proxy_url) as resp:
             data = await _safe_json(resp)
             try:
                 payload_data = OAuthTokenPayload.model_validate(data)
@@ -259,6 +263,7 @@ async def exchange_device_token(
             base_url=base_url,
             client_id=settings.oauth_client_id,
             timeout_seconds=timeout_seconds,
+            proxy_url=proxy_url,
         )
 
     return _parse_tokens(payload_data)

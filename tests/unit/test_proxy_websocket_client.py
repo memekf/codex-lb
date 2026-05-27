@@ -50,6 +50,51 @@ class _FakeConnection:
 
 
 @pytest.mark.asyncio
+async def test_connect_responses_websocket_uses_account_proxy_transport_with_local_account_id(monkeypatch):
+    fake_connection = _FakeConnection()
+    seen: dict[str, object] = {}
+
+    async def fake_websockets_connect(local_account_id: str, url: str, **kwargs):
+        seen["local_account_id"] = local_account_id
+        seen["url"] = url
+        seen["kwargs"] = kwargs
+        return fake_connection
+
+    async def unexpected_websocket_connect(*args, **kwargs):  # pragma: no cover - red-path guard
+        raise AssertionError("direct websocket_connect should not be used when local_account_id is provided")
+
+    monkeypatch.setattr(proxy_websocket_module.account_proxy, "websockets_connect", fake_websockets_connect)
+    monkeypatch.setattr(proxy_websocket_module, "websocket_connect", unexpected_websocket_connect, raising=False)
+    monkeypatch.setattr(
+        proxy_websocket_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            upstream_base_url="https://chatgpt.com/backend-api",
+            upstream_connect_timeout_seconds=7.0,
+            max_sse_event_bytes=4321,
+            upstream_websocket_trust_env=False,
+        ),
+    )
+
+    websocket = await connect_responses_websocket(
+        {"openai-beta": "responses_websockets=2026-02-06"},
+        "access-token",
+        "upstream-account",
+        local_account_id="local-account",
+    )
+
+    await websocket.send_text("hello")
+
+    assert fake_connection.sent == ["hello"]
+    assert seen["local_account_id"] == "local-account"
+    assert seen["url"] == "wss://chatgpt.com/backend-api/codex/responses"
+    kwargs = cast(dict[str, object], seen["kwargs"])
+    assert kwargs["proxy"] is None
+    additional_headers = cast(dict[str, str], kwargs["additional_headers"])
+    assert additional_headers["chatgpt-account-id"] == "upstream-account"
+
+
+@pytest.mark.asyncio
 async def test_connect_responses_websocket_uses_websockets_transport(monkeypatch):
     fake_connection = _FakeConnection()
     seen: dict[str, object] = {}

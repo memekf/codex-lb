@@ -27,6 +27,18 @@ from app.modules.proxy.http_bridge_forwarding import OwnerForwardRelayFailure
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _assume_stable_direct_account_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def resolve_fingerprint(_account_id: str) -> str:
+        return "none"
+
+    async def transport_matches(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(proxy_service, "_resolve_account_transport_fingerprint", resolve_fingerprint)
+    monkeypatch.setattr(proxy_service, "_http_bridge_session_matches_current_transport", transport_matches)
+
+
 def _make_app_settings(*, bridge_enabled: bool = True) -> Settings:
     return Settings(http_responses_session_bridge_enabled=bridge_enabled)
 
@@ -813,6 +825,7 @@ async def test_stream_via_http_bridge_turn_state_request_ignores_prompt_cache_ow
                 canonical_key="cache-derived",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-remote",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
@@ -1026,6 +1039,7 @@ def test_durable_bridge_lookup_active_owner_accepts_naive_datetime() -> None:
         canonical_key="sid-123",
         api_key_scope="__anonymous__",
         account_id="acc-1",
+        proxy_fingerprint="none",
         owner_instance_id="instance-a",
         owner_epoch=1,
         lease_expires_at=datetime(2099, 1, 1, 0, 0, 0),
@@ -1119,6 +1133,7 @@ async def test_stream_via_http_bridge_injects_durable_previous_response_anchor(
                 canonical_key="sid-123",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -1610,6 +1625,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
                 canonical_key="sid-123",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -1746,6 +1762,7 @@ async def test_stream_via_http_bridge_injects_durable_anchor_for_trimmable_full_
                 canonical_key="sid-123",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -1874,6 +1891,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
                 canonical_key="thread-123",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -1997,6 +2015,7 @@ async def test_stream_via_http_bridge_does_not_prefer_durable_account_for_soft_p
                 canonical_key="thread-soft",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -2129,6 +2148,7 @@ async def test_stream_via_http_bridge_prefers_durable_account_for_soft_prompt_ca
                 canonical_key="thread-soft-follow-up",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -2308,6 +2328,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_anchor_for_live_tu
                 canonical_key="http_turn_live",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -2433,6 +2454,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_anchor_for_live_pr
                 canonical_key="thread-live",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -2549,6 +2571,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_anchor_when_forwar
                 canonical_key="http_turn_forward",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-b",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
@@ -2701,6 +2724,7 @@ async def test_stream_via_http_bridge_clears_injected_anchor_after_owner_unavail
                 canonical_key="http_turn_fresh",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-b",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),
@@ -2827,6 +2851,7 @@ async def test_stream_via_http_bridge_does_not_inject_durable_previous_response_
                 canonical_key="derived-thread-123",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-a",
                 owner_epoch=1,
                 lease_expires_at=datetime.now(timezone.utc),
@@ -4927,6 +4952,7 @@ async def test_get_or_create_http_bridge_session_preserves_durable_canonical_pro
             canonical_key="pc-123",
             api_key_scope="__anonymous__",
             account_id="acc-1",
+            proxy_fingerprint="none",
             owner_instance_id="instance-a",
             owner_epoch=2,
             lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
@@ -5468,6 +5494,7 @@ async def test_get_or_create_http_bridge_session_recovers_locally_when_owner_end
             canonical_key="http_turn_123",
             api_key_scope="__anonymous__",
             account_id="acc-1",
+            proxy_fingerprint="none",
             owner_instance_id="instance-b",
             owner_epoch=2,
             lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
@@ -5533,6 +5560,7 @@ async def test_get_or_create_http_bridge_session_recovers_locally_without_anchor
             canonical_key="turn_123",
             api_key_scope="__anonymous__",
             account_id="acc-1",
+            proxy_fingerprint="none",
             owner_instance_id="instance-stale",
             owner_epoch=2,
             lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
@@ -5598,6 +5626,7 @@ async def test_get_or_create_http_bridge_session_prompt_cache_takes_over_stale_s
             canonical_key="cache-key",
             api_key_scope="__anonymous__",
             account_id="acc-1",
+            proxy_fingerprint="none",
             owner_instance_id="instance-stale",
             owner_epoch=2,
             lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
@@ -5691,6 +5720,7 @@ async def test_get_or_create_http_bridge_session_discards_local_session_when_dur
             canonical_key="sid-123",
             api_key_scope="__anonymous__",
             account_id="acc-1",
+            proxy_fingerprint="none",
             owner_instance_id="instance-b",
             owner_epoch=2,
             lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
@@ -6277,6 +6307,7 @@ async def test_claim_durable_http_bridge_session_rejects_remote_owner_without_ta
                 canonical_key="sid-123",
                 api_key_scope="__anonymous__",
                 account_id="acc-1",
+                proxy_fingerprint="none",
                 owner_instance_id="instance-b",
                 owner_epoch=2,
                 lease_expires_at=proxy_service.utcnow() + timedelta(seconds=60),
@@ -7889,6 +7920,7 @@ def test_http_bridge_can_recover_during_drain_ignores_soft_prompt_cache_latest_r
         canonical_key="cache-key",
         api_key_scope="__anonymous__",
         account_id="acc-1",
+        proxy_fingerprint="none",
         owner_instance_id="instance-a",
         owner_epoch=1,
         lease_expires_at=datetime.now(timezone.utc),
@@ -8049,6 +8081,7 @@ async def test_stream_via_http_bridge_replays_durable_full_resend_when_owner_is_
         canonical_key="sid-owner-unavailable",
         api_key_scope="__anonymous__",
         account_id="acc-owner",
+        proxy_fingerprint="none",
         owner_instance_id=None,
         owner_epoch=1,
         lease_expires_at=datetime.now(timezone.utc) + timedelta(seconds=60),

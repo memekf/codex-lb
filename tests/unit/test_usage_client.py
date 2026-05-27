@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, cast
 
 import pytest
 
+import app.core.clients.usage as usage_module
 from app.core.clients.usage import UsageFetchError, fetch_usage
 
 pytestmark = pytest.mark.unit
@@ -113,6 +115,44 @@ def failing_usage_server() -> tuple[str, StubRetryClient]:
     responses = [StubResponse(503, None, "busy")]
     client = StubRetryClient(responses, state)
     return "http://usage.test/backend-api", client
+
+
+@pytest.mark.asyncio
+async def test_fetch_usage_uses_account_proxy_retry_transport_when_local_account_id_is_provided(
+    usage_server,
+    monkeypatch,
+):
+    base_url, client, state = usage_server
+    seen_local_account_ids: list[str] = []
+
+    @asynccontextmanager
+    async def fake_retry_request(
+        local_account_id: str,
+        method: str,
+        url: str,
+        *,
+        client: Any,
+        **kwargs: Any,
+    ):
+        seen_local_account_ids.append(local_account_id)
+        async with client.request(method, url, **kwargs) as response:
+            yield response
+
+    monkeypatch.setattr(usage_module.account_proxy, "retry_request", fake_retry_request)
+
+    data = await fetch_usage(
+        access_token="access-token",
+        account_id="acc_test",
+        local_account_id="local-account",
+        base_url=base_url,
+        max_retries=1,
+        timeout_seconds=2.0,
+        client=cast(Any, client),
+    )
+
+    assert data.plan_type == "plus"
+    assert seen_local_account_ids == ["local-account"]
+    assert state.account == "acc_test"
 
 
 @pytest.mark.asyncio

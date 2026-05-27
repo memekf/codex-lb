@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import secrets
 import time
 from contextlib import AbstractAsyncContextManager
@@ -31,6 +32,8 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.account_proxies.repository import AccountProxyRepository
+from app.modules.account_proxies.validation import ProxyUrlValidationError, normalize_proxy_url
 from app.modules.accounts.repository import AccountIdentityConflictError, AccountsRepository
 from app.modules.oauth.schemas import (
     ManualCallbackResponse,
@@ -63,6 +66,9 @@ class OAuthState:
     finished_at: float | None = None
     callback_server: "OAuthCallbackServer | None" = None
     poll_task: asyncio.Task[None] | None = None
+    proxy_id: str | None = None
+    proxy_url: str | None = None
+    proxy_fingerprint: str | None = None
 
 
 class OAuthStateStore:
@@ -119,6 +125,9 @@ class OAuthStateStore:
             expires_at=flow.expires_at,
             finished_at=flow.finished_at,
             poll_task=flow.poll_task,
+            proxy_id=flow.proxy_id,
+            proxy_url=flow.proxy_url,
+            proxy_fingerprint=flow.proxy_fingerprint,
         )
 
     def set_flow_status_locked(self, flow: OAuthState, *, status: str, error_message: str | None) -> None:
@@ -241,13 +250,28 @@ class OAuthCallbackServer:
 _OAUTH_STORE = OAuthStateStore()
 
 
+@dataclass(frozen=True, slots=True)
+class OAuthRepositories:
+    accounts: AccountsRepository
+    account_proxies: AccountProxyRepository
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthProxySnapshot:
+    proxy_id: str | None
+    proxy_url: str | None
+    proxy_fingerprint: str | None
+
+
 class OauthService:
     def __init__(
         self,
         accounts_repo: AccountsRepository,
-        repo_factory: Callable[[], AbstractAsyncContextManager[AccountsRepository]] | None = None,
+        account_proxy_repo: AccountProxyRepository | None = None,
+        repo_factory: Callable[[], AbstractAsyncContextManager[OAuthRepositories]] | None = None,
     ) -> None:
         self._accounts_repo = accounts_repo
+        self._account_proxy_repo = account_proxy_repo
         self._encryptor = TokenEncryptor()
         self._store = _OAUTH_STORE
         self._repo_factory = repo_factory
@@ -268,13 +292,15 @@ class OauthService:
                     await self._finish_callback_server_stop(server, stop_task)
                 return OauthStartResponse(method="browser")
 
+        proxy_snapshot = await self._resolve_proxy_snapshot(request.proxy_id)
+
         if force_method == "device":
-            return await self._start_device_flow()
+            return await self._start_device_flow(proxy_snapshot)
 
         try:
-            return await self._start_browser_flow()
+            return await self._start_browser_flow(proxy_snapshot)
         except OSError:
-            return await self._start_device_flow()
+            return await self._start_device_flow(proxy_snapshot)
 
     async def oauth_status(self, flow_id: str | None = None) -> OauthStatusResponse:
         async with self._store.lock:
@@ -314,7 +340,9 @@ class OauthService:
                 return OauthCompleteResponse(status="error")
             return OauthCompleteResponse(status="pending")
 
-    async def _start_browser_flow(self) -> OauthStartResponse:
+    async def _start_browser_flow(self, proxy_snapshot: OAuthProxySnapshot | None = None) -> OauthStartResponse:
+        if proxy_snapshot is None:
+            proxy_snapshot = OAuthProxySnapshot(proxy_id=None, proxy_url=None, proxy_fingerprint=None)
         await self._wait_for_callback_server_stop()
 
         flow_id = secrets.token_urlsafe(12)
@@ -333,6 +361,9 @@ class OauthService:
                     state_token=state_token,
                     code_verifier=code_verifier,
                     expires_at=time.time() + _PENDING_BROWSER_OAUTH_FLOW_TTL_SECONDS,
+                    proxy_id=proxy_snapshot.proxy_id,
+                    proxy_url=proxy_snapshot.proxy_url,
+                    proxy_fingerprint=proxy_snapshot.proxy_fingerprint,
                 )
             )
             if self._store._callback_server is None:
@@ -400,8 +431,8 @@ class OauthService:
             return ManualCallbackResponse(status="error", error_message=message)
 
         try:
-            tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
-            await self._persist_tokens(tokens)
+            tokens = await exchange_authorization_code(code=code, code_verifier=verifier, proxy_url=flow.proxy_url)
+            await self._persist_tokens(tokens, proxy_id=flow.proxy_id)
             await self._set_success(flow.flow_id)
             asyncio.create_task(self._stop_callback_server_if_idle())
             return ManualCallbackResponse(status="success")
@@ -417,10 +448,10 @@ class OauthService:
             await self._set_error(message, flow_id=flow.flow_id)
             return ManualCallbackResponse(status="error", error_message=message)
 
-    async def _start_device_flow(self) -> OauthStartResponse:
+    async def _start_device_flow(self, proxy_snapshot: OAuthProxySnapshot) -> OauthStartResponse:
         flow_id = secrets.token_urlsafe(12)
         try:
-            device = await request_device_code()
+            device = await request_device_code(proxy_url=proxy_snapshot.proxy_url)
         except OAuthError as exc:
             await self._set_error(exc.message)
             raise
@@ -434,6 +465,9 @@ class OauthService:
                 user_code=device.user_code,
                 interval_seconds=device.interval_seconds,
                 expires_at=time.time() + device.expires_in_seconds,
+                proxy_id=proxy_snapshot.proxy_id,
+                proxy_url=proxy_snapshot.proxy_url,
+                proxy_fingerprint=proxy_snapshot.proxy_fingerprint,
             )
             self._store.remove_pending_device_flows_locked()
             self._store.remember_flow_locked(flow)
@@ -468,8 +502,8 @@ class OauthService:
             return self._html_response(_error_html("Invalid OAuth callback."))
 
         try:
-            tokens = await exchange_authorization_code(code=code, code_verifier=verifier)
-            await self._persist_tokens(tokens)
+            tokens = await exchange_authorization_code(code=code, code_verifier=verifier, proxy_url=flow.proxy_url)
+            await self._persist_tokens(tokens, proxy_id=flow.proxy_id)
             await self._set_success(flow.flow_id)
             html = _success_html()
         except OAuthError as exc:
@@ -488,9 +522,10 @@ class OauthService:
                 tokens = await exchange_device_token(
                     device_auth_id=context.device_auth_id,
                     user_code=context.user_code,
+                    proxy_url=context.proxy_url,
                 )
                 if tokens:
-                    await self._persist_tokens(tokens)
+                    await self._persist_tokens(tokens, proxy_id=context.proxy_id)
                     await self._set_success(flow_id)
                     return
                 await _async_sleep(context.interval_seconds)
@@ -519,11 +554,13 @@ class OauthService:
             user_code=state.user_code,
             interval_seconds=max(interval, 0),
             expires_at=state.expires_at,
+            proxy_id=state.proxy_id,
+            proxy_url=state.proxy_url,
         )
         state.poll_task = asyncio.create_task(self._poll_device_tokens(state.flow_id, poll_context))
         return True
 
-    async def _persist_tokens(self, tokens: OAuthTokens) -> None:
+    async def _persist_tokens(self, tokens: OAuthTokens, *, proxy_id: str | None = None) -> None:
         claims = extract_id_token_claims(tokens.id_token)
         auth_claims = claims.auth or OpenAIAuthClaims()
         raw_account_id = auth_claims.chatgpt_account_id or claims.chatgpt_account_id
@@ -545,12 +582,44 @@ class OauthService:
             last_refresh=utcnow(),
             status=AccountStatus.ACTIVE,
             deactivation_reason=None,
+            proxy_id=proxy_id,
         )
         if self._repo_factory:
-            async with self._repo_factory() as repo:
-                await repo.upsert(account)
+            async with self._repo_factory() as repos:
+                await self._ensure_proxy_still_exists(proxy_id, repos.account_proxies)
+                await repos.accounts.upsert(account, replace_proxy_id=True)
         else:
-            await self._accounts_repo.upsert(account)
+            await self._ensure_proxy_still_exists(proxy_id, self._account_proxy_repo)
+            await self._accounts_repo.upsert(account, replace_proxy_id=True)
+
+    async def _resolve_proxy_snapshot(self, proxy_id: str | None) -> OAuthProxySnapshot:
+        if proxy_id is None:
+            return OAuthProxySnapshot(proxy_id=None, proxy_url=None, proxy_fingerprint=None)
+        if self._account_proxy_repo is None:
+            raise OAuthError("proxy_unavailable", "Proxy lookup is not available for OAuth")
+
+        proxy = await self._account_proxy_repo.get(proxy_id)
+        if proxy is None:
+            raise OAuthError("proxy_not_found", "Selected proxy was not found")
+        try:
+            proxy_url = normalize_proxy_url(self._encryptor.decrypt(proxy.proxy_url_encrypted))
+        except (ProxyUrlValidationError, ValueError) as exc:
+            raise OAuthError("invalid_proxy_url", "Selected proxy URL is invalid") from exc
+        return OAuthProxySnapshot(
+            proxy_id=proxy_id,
+            proxy_url=proxy_url,
+            proxy_fingerprint=_proxy_fingerprint(proxy_id, proxy_url),
+        )
+
+    @staticmethod
+    async def _ensure_proxy_still_exists(
+        proxy_id: str | None,
+        repository: AccountProxyRepository | None,
+    ) -> None:
+        if proxy_id is None:
+            return
+        if repository is None or not await repository.exists(proxy_id):
+            raise OAuthError("proxy_not_found", "Selected proxy no longer exists")
 
     async def _set_success(self, flow_id: str | None = None) -> None:
         async with self._store.lock:
@@ -629,6 +698,13 @@ class DevicePollContext:
     user_code: str
     interval_seconds: int
     expires_at: float
+    proxy_id: str | None = None
+    proxy_url: str | None = None
+
+
+def _proxy_fingerprint(proxy_id: str, proxy_url: str) -> str:
+    digest = hashlib.sha256(proxy_url.encode("utf-8")).hexdigest()[:16]
+    return f"proxy:{proxy_id}:{digest}"
 
 
 def _success_html() -> str:

@@ -244,7 +244,7 @@ async def _fetch_models_with_transport_recovery(
     account_id = account.chatgpt_account_id
 
     try:
-        return await fetch_models_for_plan(access_token, account_id)
+        return await fetch_models_for_plan(access_token, account_id, local_account_id=account.id)
     except ModelFetchError as exc:
         if not exc.transport_error or transport_recovery.attempted:
             raise
@@ -253,7 +253,7 @@ async def _fetch_models_with_transport_recovery(
         transport_recovery.attempted = True
         access_token = encryptor.decrypt(account.access_token_encrypted)
         account_id = account.chatgpt_account_id
-        return await fetch_models_for_plan(access_token, account_id)
+        return await fetch_models_for_plan(access_token, account_id, local_account_id=account.id)
 
 
 async def _refresh_http_client_after_transport_error(account: Account, transport_exc: BaseException) -> None:

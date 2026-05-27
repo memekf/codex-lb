@@ -2,6 +2,7 @@ import { Check, CircleAlert, Copy, ExternalLink, Loader2, RefreshCw } from "luci
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -12,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import type { OAuthState } from "@/features/accounts/schemas";
+import type { AccountProxy } from "@/features/proxies/schemas";
 import { formatCountdown } from "@/utils/formatters";
 
 type Stage = "intro" | "browser" | "device" | "success" | "error";
@@ -117,10 +119,12 @@ export type OauthDialogProps = {
   open: boolean;
   state: OAuthState;
   onOpenChange: (open: boolean) => void;
-  onStart: (method?: "browser" | "device") => Promise<void>;
+  onStart: (method?: "browser" | "device", proxyId?: string | null) => Promise<void>;
   onComplete: () => Promise<void>;
   onManualCallback: (callbackUrl: string) => Promise<void>;
   onReset: () => void;
+  proxies?: AccountProxy[];
+  currentProxyId?: string | null;
 };
 
 export function OauthDialog({
@@ -131,8 +135,12 @@ export function OauthDialog({
   onComplete,
   onManualCallback,
   onReset,
+  proxies = [],
+  currentProxyId = null,
 }: OauthDialogProps) {
   const [selectedMethod, setSelectedMethod] = useState<"browser" | "device">("browser");
+  const [selectedProxyOverride, setSelectedProxyOverride] = useState<string | null | undefined>(undefined);
+  const selectedProxyId = selectedProxyOverride === undefined ? currentProxyId : selectedProxyOverride;
   const stage = getStage(state);
   const completedRef = useRef(false);
   const browserRefreshInProgress = stage === "browser" && state.status === "starting";
@@ -152,15 +160,16 @@ export function OauthDialog({
     if (!next) {
       onReset();
       setSelectedMethod("browser");
+      setSelectedProxyOverride(undefined);
     }
   };
 
   const handleStart = () => {
-    void onStart(selectedMethod);
+    void onStart(selectedMethod, selectedProxyId);
   };
 
   const handleRefreshBrowserLink = () => {
-    void onStart("browser");
+    void onStart("browser", selectedProxyId);
   };
 
   const handleChangeMethod = () => {
@@ -182,6 +191,25 @@ export function OauthDialog({
         {/* Intro stage */}
         {stage === "intro" ? (
           <div className="space-y-2">
+            <div className="space-y-1.5">
+              <p className="text-xs font-medium text-muted-foreground">Proxy</p>
+              <Select
+                value={selectedProxyId ?? "__direct__"}
+                onValueChange={(value) => setSelectedProxyOverride(value === "__direct__" ? null : value)}
+              >
+                <SelectTrigger aria-label="OAuth proxy" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__direct__">Direct</SelectItem>
+                  {proxies.map((proxy) => (
+                    <SelectItem key={proxy.id} value={proxy.id}>
+                      {proxy.displayName} ({proxy.status})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <button
               type="button"
               onClick={() => setSelectedMethod("browser")}

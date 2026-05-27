@@ -26,6 +26,21 @@ if (typeof document !== "undefined" && typeof document.elementFromPoint !== "fun
   document.elementFromPoint = () => null;
 }
 
+if (typeof Element !== "undefined") {
+  if (typeof Element.prototype.hasPointerCapture !== "function") {
+    Element.prototype.hasPointerCapture = () => false;
+  }
+  if (typeof Element.prototype.setPointerCapture !== "function") {
+    Element.prototype.setPointerCapture = () => undefined;
+  }
+  if (typeof Element.prototype.releasePointerCapture !== "function") {
+    Element.prototype.releasePointerCapture = () => undefined;
+  }
+  if (typeof Element.prototype.scrollIntoView !== "function") {
+    Element.prototype.scrollIntoView = () => undefined;
+  }
+}
+
 ensureLocalStorageShim();
 
 if (typeof globalThis.ResizeObserver === "undefined") {

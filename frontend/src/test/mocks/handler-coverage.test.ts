@@ -36,6 +36,14 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/accounts/:accountId/trends",
 	"POST /api/accounts/:accountId/export",
 	"DELETE /api/accounts/:accountId",
+	"PUT /api/accounts/:accountId/proxy",
+	// proxies
+	"GET /api/proxies",
+	"POST /api/proxies",
+	"POST /api/proxies/test",
+	"POST /api/proxies/:proxyId/test",
+	"PUT /api/proxies/:proxyId",
+	"DELETE /api/proxies/:proxyId",
 	// oauth
 	"POST /api/oauth/start",
 	"GET /api/oauth/status",

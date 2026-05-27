@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, File, Request, Response, UploadFile
 from app.core.audit.service import AuditService
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
-from app.dependencies import AccountsContext, get_accounts_context
+from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
     AccountAliasRequest,
@@ -16,11 +16,13 @@ from app.modules.accounts.schemas import (
     AccountLimitWarmupUpdateRequest,
     AccountLimitWarmupUpdateResponse,
     AccountPauseResponse,
+    AccountProxyAssignmentRequest,
+    AccountProxyAssignmentResponse,
     AccountReactivateResponse,
     AccountsResponse,
     AccountTrendsResponse,
 )
-from app.modules.accounts.service import InvalidAuthJsonError
+from app.modules.accounts.service import AccountNotFoundError, AccountProxyNotFoundError, InvalidAuthJsonError
 
 router = APIRouter(
     prefix="/api/accounts",
@@ -35,6 +37,23 @@ async def list_accounts(
 ) -> AccountsResponse:
     accounts = await context.service.list_accounts()
     return AccountsResponse(accounts=accounts)
+
+
+@router.put("/{account_id}/proxy", response_model=AccountProxyAssignmentResponse)
+async def set_account_proxy(
+    account_id: str,
+    payload: AccountProxyAssignmentRequest,
+    request: Request,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountProxyAssignmentResponse:
+    try:
+        proxy_id = await context.service.set_account_proxy(account_id, payload.proxy_id)
+    except AccountNotFoundError as exc:
+        raise DashboardNotFoundError("Account not found", code="account_not_found") from exc
+    except AccountProxyNotFoundError as exc:
+        raise DashboardNotFoundError("Proxy not found", code="proxy_not_found") from exc
+    await get_proxy_service_for_app(request.app).close_http_bridge_sessions_for_account(account_id)
+    return AccountProxyAssignmentResponse(status="updated", proxy_id=proxy_id)
 
 
 @router.get("/{account_id}/trends", response_model=AccountTrendsResponse)

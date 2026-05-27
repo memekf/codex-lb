@@ -35,6 +35,7 @@ from typing import Any
 
 import aiohttp
 
+from app.core.clients import account_proxy
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.errors import openai_error
@@ -161,12 +162,39 @@ def _parse_upstream_error_body(text: str) -> Any:
         return text
 
 
+def _post_context(
+    *,
+    local_account_id: str | None,
+    url: str,
+    client_session: aiohttp.ClientSession,
+    data: bytes,
+    headers: dict[str, str],
+    timeout: aiohttp.ClientTimeout,
+) -> Any:
+    if local_account_id is None:
+        return client_session.post(
+            url,
+            data=data,
+            headers=headers,
+            timeout=timeout,
+        )
+    return account_proxy.post(
+        local_account_id,
+        url,
+        session=client_session,
+        data=data,
+        headers=headers,
+        timeout=timeout,
+    )
+
+
 async def create_file(
     *,
     payload: Mapping[str, JsonValue],
     headers: Mapping[str, str],
     access_token: str,
     account_id: str | None,
+    local_account_id: str | None = None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
 ) -> dict[str, JsonValue]:
@@ -189,12 +217,15 @@ async def create_file(
     body = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     try:
         async with lease_http_session(session) as client_session:
-            async with client_session.post(
-                url,
+            request_context = _post_context(
+                local_account_id=local_account_id,
+                url=url,
+                client_session=client_session,
                 data=body,
                 headers=upstream_headers,
                 timeout=timeout,
-            ) as response:
+            )
+            async with request_context as response:
                 text = await response.text()
                 if response.status >= 400:
                     raise FileProxyError(response.status, _parse_upstream_error_body(text))
@@ -231,6 +262,7 @@ async def finalize_file(
     headers: Mapping[str, str],
     access_token: str,
     account_id: str | None,
+    local_account_id: str | None = None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
 ) -> dict[str, JsonValue]:
@@ -284,12 +316,15 @@ async def finalize_file(
                 sock_connect=min(effective_connect, per_poll_total),
             )
             try:
-                async with client_session.post(
-                    url,
+                request_context = _post_context(
+                    local_account_id=local_account_id,
+                    url=url,
+                    client_session=client_session,
                     data=b"{}",
                     headers=upstream_headers,
                     timeout=timeout,
-                ) as response:
+                )
+                async with request_context as response:
                     text = await response.text()
                     if response.status >= 400:
                         raise FileProxyError(response.status, _parse_upstream_error_body(text))

@@ -18,6 +18,7 @@ from websockets.exceptions import (
 )
 from websockets.typing import Origin
 
+from app.core.clients import account_proxy
 from app.core.clients.proxy import ProxyResponseError, filter_inbound_headers
 from app.core.config.settings import get_settings
 from app.core.conversation_archive import archive_bytes, archive_text
@@ -250,6 +251,7 @@ async def connect_responses_websocket(
     account_id: str | None,
     *,
     base_url: str | None = None,
+    local_account_id: str | None = None,
 ) -> UpstreamResponsesWebSocket:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -258,21 +260,29 @@ async def connect_responses_websocket(
     origin = cast(Origin | None, _pop_header_case_insensitive(upstream_headers, "origin"))
     user_agent = _pop_header_case_insensitive(upstream_headers, "user-agent")
     try:
-        response = await websocket_connect(
-            url,
-            origin=origin,
-            additional_headers=upstream_headers or None,
-            user_agent_header=user_agent,
-            proxy=True if settings.upstream_websocket_trust_env else None,
-            open_timeout=settings.upstream_connect_timeout_seconds,
+        request_kwargs = {
+            "origin": origin,
+            "additional_headers": upstream_headers or None,
+            "user_agent_header": user_agent,
+            "proxy": True if settings.upstream_websocket_trust_env else None,
+            "open_timeout": settings.upstream_connect_timeout_seconds,
             # Long Codex turns can spend minutes in upstream reasoning without
             # sending application frames. Keep transport pings enabled so
             # intermediaries still see liveness, but disable the library's pong
             # watchdog so codex-lb's own request/idle budgets decide when a
             # healthy long turn has stalled.
-            ping_timeout=None,
-            max_size=settings.max_sse_event_bytes,
-        )
+            "ping_timeout": None,
+            "max_size": settings.max_sse_event_bytes,
+        }
+        if local_account_id is None:
+            response = await websocket_connect(url, **request_kwargs)
+        else:
+            response = await account_proxy.websockets_connect(local_account_id, url, **request_kwargs)
+    except account_proxy.AccountProxyTransportError as exc:
+        raise ProxyResponseError(
+            502,
+            openai_error("upstream_unavailable", exc.message, error_type="server_error"),
+        ) from exc
     except asyncio.TimeoutError as exc:
         raise ProxyResponseError(
             502,

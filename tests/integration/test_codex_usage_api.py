@@ -54,9 +54,16 @@ async def _create_api_key(*, name: str, limits: list[LimitRuleInput] | None = No
 
 @pytest.fixture(autouse=True)
 def stub_codex_usage_caller_validation(monkeypatch):
-    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: object) -> UsagePayload:
+    async def stub_fetch_usage(
+        *,
+        access_token: str,
+        account_id: str | None,
+        local_account_id: str | None = None,
+        **_: object,
+    ) -> UsagePayload:
         assert access_token == "chatgpt-token"
         assert account_id is not None
+        assert local_account_id is not None
         return UsagePayload.model_validate({"plan_type": "plus"})
 
     monkeypatch.setattr("app.core.auth.dependencies.fetch_usage", stub_fetch_usage)

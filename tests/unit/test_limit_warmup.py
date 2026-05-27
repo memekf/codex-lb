@@ -7,7 +7,7 @@ import pytest
 
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
-from app.modules.limit_warmup.service import LimitWarmupSendResult, LimitWarmupService
+from app.modules.limit_warmup.service import LimitWarmupSendResult, LimitWarmupService, StreamingLimitWarmupSender
 
 pytestmark = pytest.mark.unit
 
@@ -185,6 +185,27 @@ class FakeSender:
             error_code=self.error_code,
             error_message="failed" if self.error_code else None,
         )
+
+
+@pytest.mark.asyncio
+async def test_streaming_sender_routes_warmup_by_local_account_id(monkeypatch) -> None:
+    account = _account()
+    sender = StreamingLimitWarmupSender(SimpleNamespace())
+
+    async def ensure_fresh(candidate: Account) -> Account:
+        return candidate
+
+    async def fake_stream_responses(*args: object, **kwargs: object):
+        assert kwargs["local_account_id"] == account.id
+        yield 'data: {"type":"response.completed","response":{"id":"resp_warmup"}}\n\n'
+
+    sender._auth_manager.ensure_fresh = ensure_fresh
+    sender._encryptor = SimpleNamespace(decrypt=lambda _: "token")
+    monkeypatch.setattr("app.modules.limit_warmup.service.stream_responses", fake_stream_responses)
+
+    result = await sender.send(account, model="gpt-5.1-codex-mini", prompt="Say OK.")
+
+    assert result.success is True
 
 
 @pytest.mark.asyncio

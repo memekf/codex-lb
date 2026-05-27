@@ -82,7 +82,71 @@ describe("OauthDialog", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Start sign-in" }));
-    expect(onStart).toHaveBeenCalledWith("browser");
+    expect(onStart).toHaveBeenCalledWith("browser", null);
+  });
+
+  it("preselects an assigned proxy for reauthorization", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <OauthDialog
+        open
+        state={idleState}
+        onOpenChange={vi.fn()}
+        onStart={onStart}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+        currentProxyId="proxy_primary"
+        proxies={[{
+          id: "proxy_primary",
+          displayName: "Primary proxy",
+          redactedProxyUrl: "http://***@proxy.example:8080",
+          status: "working",
+          lastTestedAt: null,
+          lastTestError: null,
+          createdAt: "2026-01-01T12:00:00Z",
+          updatedAt: "2026-01-01T12:00:00Z",
+        }]}
+      />,
+    );
+
+    expect(screen.getByRole("combobox", { name: "OAuth proxy" })).toHaveTextContent("Primary proxy");
+    await user.click(screen.getByRole("combobox", { name: "OAuth proxy" }));
+    await user.click(screen.getByRole("option", { name: "Direct" }));
+    await user.click(screen.getByRole("button", { name: "Start sign-in" }));
+    expect(onStart).toHaveBeenCalledWith("browser", null);
+  });
+
+  it("submits the selected proxy for a new OAuth account", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <OauthDialog
+        open
+        state={idleState}
+        onOpenChange={vi.fn()}
+        onStart={onStart}
+        onComplete={vi.fn().mockResolvedValue(undefined)}
+        onManualCallback={vi.fn().mockResolvedValue(undefined)}
+        onReset={vi.fn()}
+        proxies={[{
+          id: "proxy_primary",
+          displayName: "Primary proxy",
+          redactedProxyUrl: "http://***@proxy.example:8080",
+          status: "working",
+          createdAt: "2026-01-01T12:00:00Z",
+          updatedAt: "2026-01-01T12:00:00Z",
+        }]}
+      />,
+    );
+
+    await user.click(screen.getByRole("combobox", { name: "OAuth proxy" }));
+    await user.click(screen.getByRole("option", { name: "Primary proxy (working)" }));
+    await user.click(screen.getByRole("button", { name: "Start sign-in" }));
+    expect(onStart).toHaveBeenCalledWith("browser", "proxy_primary");
   });
 
   it("renders device stage with user code and verification URL", () => {
@@ -186,7 +250,7 @@ describe("OauthDialog", () => {
 
     await user.click(screen.getByRole("button", { name: "Refresh link" }));
 
-    expect(onStart).toHaveBeenCalledWith("browser");
+    expect(onStart).toHaveBeenCalledWith("browser", null);
   });
 
   it("renders a disabled loading refresh state while generating a fresh browser link", () => {

@@ -158,6 +158,7 @@ class StreamingLimitWarmupSender:
                 access_token,
                 fresh_account.chatgpt_account_id,
                 upstream_stream_transport_override="http",
+                local_account_id=fresh_account.id,
             ):
                 event = parse_sse_event(event_block)
                 if event is None:

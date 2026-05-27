@@ -97,6 +97,34 @@ def test_inspect_migration_state_no_upgrade_after_head(tmp_path: Path) -> None:
     assert state.has_alembic_version_table is True
 
 
+def test_run_upgrade_head_adds_managed_proxy_schema(tmp_path: Path) -> None:
+    db_path = tmp_path / "managed-proxies.db"
+    url = _db_url(db_path)
+
+    run_upgrade(url, "head", bootstrap_legacy=False)
+
+    sync_url = to_sync_database_url(url)
+    with create_engine(sync_url, future=True).connect() as connection:
+        inspector = inspect(connection)
+        assert "account_proxies" in inspector.get_table_names()
+        proxy_columns = {column["name"] for column in inspector.get_columns("account_proxies")}
+        assert {
+            "id",
+            "display_name",
+            "proxy_url_encrypted",
+            "status",
+            "last_tested_at",
+            "last_test_error",
+            "last_test_latency_ms",
+            "created_at",
+            "updated_at",
+        }.issubset(proxy_columns)
+        account_columns = {column["name"] for column in inspector.get_columns("accounts")}
+        assert "proxy_id" in account_columns
+        bridge_columns = {column["name"] for column in inspector.get_columns("http_bridge_sessions")}
+        assert "proxy_fingerprint" in bridge_columns
+
+
 def test_wait_for_head_returns_once_schema_is_current(monkeypatch) -> None:
     states = iter(
         [

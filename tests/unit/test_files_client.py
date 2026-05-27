@@ -87,6 +87,34 @@ def _client_session(session: _FakeSession) -> aiohttp.ClientSession:
 
 
 @pytest.mark.asyncio
+async def test_create_file_uses_account_proxy_transport_when_local_account_id_is_provided(monkeypatch) -> None:
+    response_body = json.dumps({"file_id": "file_proxy", "upload_url": "https://blob.example/sas?token=xyz"})
+    session = _FakeSession([_FakeResponse(status=200, body=response_body)])
+    seen_local_account_ids: list[str] = []
+
+    @asynccontextmanager
+    async def fake_account_post(local_account_id: str, url: str, *, session: aiohttp.ClientSession, **kwargs: Any):
+        seen_local_account_ids.append(local_account_id)
+        async with session.post(url, **kwargs) as response:
+            yield response
+
+    monkeypatch.setattr(files_module.account_proxy, "post", fake_account_post)
+
+    result = await create_file(
+        payload={"file_name": "page.pdf", "file_size": 1024, "use_case": OPENAI_FILE_USE_CASE},
+        headers={},
+        access_token="upstream-token",
+        account_id="upstream-account",
+        local_account_id="local-account",
+        session=_client_session(session),
+    )
+
+    assert result["file_id"] == "file_proxy"
+    assert seen_local_account_ids == ["local-account"]
+    assert session.calls[0]["headers"]["chatgpt-account-id"] == "upstream-account"
+
+
+@pytest.mark.asyncio
 async def test_create_file_returns_upstream_json_on_success() -> None:
     response_body = json.dumps({"file_id": "file_abc", "upload_url": "https://blob.example/sas?token=xyz"})
     session = _FakeSession([_FakeResponse(status=200, body=response_body)])

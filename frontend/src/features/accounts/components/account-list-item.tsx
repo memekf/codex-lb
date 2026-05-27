@@ -3,6 +3,7 @@ import { isEmailLabel } from "@/components/blur-email";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import { StatusBadge } from "@/components/status-badge";
+import { Badge } from "@/components/ui/badge";
 import { MiniQuotaBar } from "@/components/mini-quota-bar";
 import type { AccountSummary } from "@/features/accounts/schemas";
 import { normalizeStatus } from "@/utils/account-status";
@@ -59,6 +60,11 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
             {emailSubtitle ? <><span className={blurred ? "privacy-blur" : undefined}>{emailSubtitle}</span>{idSuffix}</> : <>{baseSubtitle}{idSuffix}</>}
           </p>
         </div>
+        {account.proxyAvailability === "unavailable" ? (
+          <Badge variant="outline" className="border-red-500/20 bg-red-500/15 text-red-700 dark:text-red-400">
+            Proxy issue
+          </Badge>
+        ) : null}
         <StatusBadge status={status} />
       </div>
       <div className={cn("mt-2 grid gap-2", visibleQuotaRows > 1 ? "grid-cols-2" : "grid-cols-1")}>
@@ -68,6 +74,9 @@ export function AccountListItem({ account, selected, showAccountId = false, onSe
       <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
         <span>{warmupLabel}</span>
         <span className="truncate">{warmupMeta}</span>
+      </div>
+      <div className="mt-1 truncate text-[10px] text-muted-foreground">
+        {account.proxyId ? `Proxy: ${account.proxyDisplayName ?? account.proxyId} (${account.proxyAvailability})` : "Proxy: direct"}
       </div>
     </button>
   );

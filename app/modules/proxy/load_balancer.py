@@ -25,6 +25,7 @@ from app.core.balancer import (
 )
 from app.core.balancer.types import UpstreamError
 from app.core.config.settings import get_settings
+from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import get_model_registry
 from app.core.plan_types import account_plan_matches_allowed, normalize_account_plan_type
 from app.core.resilience.circuit_breaker import are_all_account_circuit_breakers_open
@@ -32,7 +33,15 @@ from app.core.resilience.degradation import get_status as get_degradation_status
 from app.core.resilience.degradation import set_degraded, set_normal
 from app.core.usage.quota import apply_usage_quota
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, AdditionalUsageHistory, StickySessionKind, UsageHistory
+from app.db.models import (
+    Account,
+    AccountProxyStatus,
+    AccountStatus,
+    AdditionalUsageHistory,
+    StickySessionKind,
+    UsageHistory,
+)
+from app.modules.account_proxies.validation import normalize_proxy_url
 from app.modules.proxy.account_cache import get_account_selection_cache
 from app.modules.proxy.additional_model_limits import get_additional_quota_key_for_model_id
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
@@ -1280,7 +1289,30 @@ def _filter_accounts_for_model(accounts: list[Account], model: str) -> list[Acco
 
 
 def _selectable_accounts(accounts: list[Account]) -> list[Account]:
-    return [account for account in accounts if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)]
+    return [
+        account
+        for account in accounts
+        if account.status not in (AccountStatus.DEACTIVATED, AccountStatus.PAUSED)
+        and _account_proxy_dependency_is_selectable(account)
+    ]
+
+
+def _account_proxy_dependency_is_selectable(account: Account) -> bool:
+    if account.proxy_id is None:
+        return True
+    proxy = account.proxy
+    if proxy is None:
+        return False
+    status = proxy.status.value if isinstance(proxy.status, AccountProxyStatus) else str(proxy.status)
+    if status == AccountProxyStatus.FAILED.value or (
+        status == AccountProxyStatus.TESTING.value and proxy.last_test_error is not None
+    ):
+        return False
+    try:
+        normalize_proxy_url(TokenEncryptor().decrypt(proxy.proxy_url_encrypted))
+    except Exception:
+        return False
+    return True
 
 
 def _gated_limit_name_for_model(model: str | None) -> str | None:

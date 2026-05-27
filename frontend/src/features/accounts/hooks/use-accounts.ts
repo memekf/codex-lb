@@ -10,6 +10,7 @@ import {
   pauseAccount,
   reactivateAccount,
   setAccountAlias,
+  setAccountProxy,
   updateAccountLimitWarmup,
 } from "@/features/accounts/api";
 
@@ -113,6 +114,19 @@ export function useAccountMutations() {
     },
   });
 
+  const setProxyMutation = useMutation({
+    mutationFn: ({ accountId, proxyId }: { accountId: string; proxyId: string | null }) =>
+      setAccountProxy(accountId, proxyId),
+    onSuccess: () => {
+      toast.success("Account proxy updated");
+      invalidateAccountRelatedQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: ["proxies", "list"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Proxy update failed");
+    },
+  });
+
   return {
     importMutation,
     pauseMutation,
@@ -121,6 +135,7 @@ export function useAccountMutations() {
     deleteMutation,
     exportMutation,
     limitWarmupMutation,
+    setProxyMutation,
   };
 }
 

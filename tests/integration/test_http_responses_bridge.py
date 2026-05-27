@@ -31,7 +31,15 @@ _TEST_SYNC_TIMEOUT_SECONDS = 5.0
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def _cleanup_http_bridge_sessions(app_instance):
+async def _cleanup_http_bridge_sessions(app_instance, monkeypatch: pytest.MonkeyPatch):
+    async def resolve_fingerprint(_account_id: str) -> str:
+        return "none"
+
+    async def transport_matches(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(proxy_module, "_resolve_account_transport_fingerprint", resolve_fingerprint)
+    monkeypatch.setattr(proxy_module, "_http_bridge_session_matches_current_transport", transport_matches)
     yield
     service = get_proxy_service_for_app(app_instance)
     async with service._http_bridge_lock:
@@ -1281,6 +1289,7 @@ def _make_dummy_bridge_session(session_key: proxy_module._HTTPBridgeSessionKey) 
         previous_response_ids=set(),
         durable_session_id=None,
         durable_owner_epoch=None,
+        proxy_fingerprint="none",
         upstream_reader=None,
         upstream_control=proxy_module._WebSocketUpstreamControl(),
         upstream=SimpleNamespace(close=_close),

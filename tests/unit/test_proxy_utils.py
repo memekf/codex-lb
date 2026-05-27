@@ -51,6 +51,19 @@ from app.modules.usage.repository import AdditionalUsageRepository, UsageReposit
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _assume_stable_direct_account_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def resolve_fingerprint(_account_id: str) -> str:
+        return "none"
+
+    async def transport_matches(*_args: object, **_kwargs: object) -> bool:
+        return True
+
+    monkeypatch.setattr(proxy_service, "_resolve_account_transport_fingerprint", resolve_fingerprint)
+    monkeypatch.setattr(proxy_service, "_http_bridge_session_matches_current_transport", transport_matches)
+    monkeypatch.setattr(proxy_service, "_websocket_upstream_matches_current_transport", transport_matches)
+
+
 def test_websocket_precreated_retry_error_code_does_not_replay_missing_tool_output():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_missing_tool_precreated",
@@ -3124,9 +3137,10 @@ async def test_stream_responses_via_websocket_counts_connect_and_send_against_to
         connect_timeout_seconds: float,
         max_msg_size: int,
         account_id: str | None = None,
+        local_account_id: str | None = None,
         hold_half_open_probe: bool = False,
     ):
-        del session, url, headers, max_msg_size, account_id, hold_half_open_probe
+        del session, url, headers, max_msg_size, account_id, local_account_id, hold_half_open_probe
         recorded["connect_timeout_seconds"] = connect_timeout_seconds
         return websocket, websocket
 
@@ -13522,7 +13536,7 @@ async def test_ensure_fresh_same_stale_account_joins_singleflight_before_refresh
     release = asyncio.Event()
     refresh_calls = 0
 
-    async def fake_refresh_access_token(_: str):
+    async def fake_refresh_access_token(_: str, **_kwargs: object):
         nonlocal refresh_calls
         refresh_calls += 1
         started.set()
@@ -15780,7 +15794,7 @@ async def test_inline_http_bridge_image_urls_converts_external_urls(monkeypatch)
     monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
     monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline)
     monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
-    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+    monkeypatch.setattr(proxy_service, "_image_fetch_session", lambda s, _local_account_id=None: s)
 
     original_payload = {
         "type": "response.create",
@@ -15874,7 +15888,7 @@ async def test_inline_http_bridge_image_urls_rechecks_expanded_payload_size(monk
     monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
     monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline)
     monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
-    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+    monkeypatch.setattr(proxy_service, "_image_fetch_session", lambda s, _local_account_id=None: s)
     monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 1)
     monkeypatch.setattr(
         proxy_service,
@@ -15945,6 +15959,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
 
     inline = AsyncMock(return_value=inlined_text)
     monkeypatch.setattr(service, "_inline_http_bridge_image_urls", inline)
+    monkeypatch.setattr(service, "_ensure_http_bridge_session_transport_current", AsyncMock())
     monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
     monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
     monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
@@ -15956,7 +15971,7 @@ async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
         queue_limit=1,
     )
 
-    inline.assert_awaited_once_with(original_text, request_state)
+    inline.assert_awaited_once_with(original_text, request_state, "acc-submit-inline")
     send_text.assert_awaited_once_with(inlined_text)
     assert list(session.pending_requests) == [request_state]
 
@@ -15996,6 +16011,7 @@ async def test_submit_http_bridge_request_checks_queue_before_inlining(monkeypat
 
     inline = AsyncMock(side_effect=AssertionError("queue-full requests must not fetch images"))
     monkeypatch.setattr(service, "_inline_http_bridge_image_urls", inline)
+    monkeypatch.setattr(service, "_ensure_http_bridge_session_transport_current", AsyncMock())
 
     with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
         await service._submit_http_bridge_request(
@@ -16130,7 +16146,7 @@ async def test_inline_http_bridge_image_urls_converts_top_level_input_image(monk
     monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline_nested)
     monkeypatch.setattr(proxy_service, "_inline_content_images", fake_inline_content)
     monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
-    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+    monkeypatch.setattr(proxy_service, "_image_fetch_session", lambda s, _local_account_id=None: s)
 
     original_payload = {
         "type": "response.create",
@@ -16221,7 +16237,7 @@ async def test_inline_http_bridge_image_urls_skips_data_urls(monkeypatch):
     monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
     monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline)
     monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
-    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+    monkeypatch.setattr(proxy_service, "_image_fetch_session", lambda s, _local_account_id=None: s)
 
     original_payload = {
         "type": "response.create",
@@ -16278,7 +16294,7 @@ async def test_inline_http_bridge_image_urls_rejects_when_fetch_fails(monkeypatc
     monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
     monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline_noop)
     monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
-    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+    monkeypatch.setattr(proxy_service, "_image_fetch_session", lambda s, _local_account_id=None: s)
 
     original_payload = {
         "type": "response.create",

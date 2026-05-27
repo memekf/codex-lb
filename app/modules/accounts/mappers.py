@@ -9,7 +9,8 @@ from app.core.plan_types import coerce_account_plan_type
 from app.core.usage.quota import apply_usage_quota
 from app.core.usage.types import UsageTrendBucket, UsageWindowRow
 from app.core.utils.time import from_epoch_seconds
-from app.db.models import Account, AccountLimitWarmup, AccountStatus, UsageHistory
+from app.db.models import Account, AccountLimitWarmup, AccountProxyStatus, AccountStatus, UsageHistory
+from app.modules.account_proxies.validation import ProxyUrlValidationError, normalize_proxy_url, redact_proxy_url
 from app.modules.accounts.schemas import (
     AccountAdditionalQuota,
     AccountAuthStatus,
@@ -119,6 +120,7 @@ def _account_to_summary(
         effective_secondary_usage,
         secondary_used_percent,
     )
+    proxy_metadata = _build_proxy_metadata(account, encryptor)
     return AccountSummary(
         account_id=account.id,
         email=account.email,
@@ -145,7 +147,121 @@ def _account_to_summary(
         auth=auth_status,
         limit_warmup_enabled=account.limit_warmup_enabled,
         limit_warmup=_limit_warmup_to_status(limit_warmup),
+        proxy_id=proxy_metadata.proxy_id,
+        proxy_display_name=proxy_metadata.proxy_display_name,
+        proxy_redacted_url=proxy_metadata.proxy_redacted_url,
+        proxy_status=proxy_metadata.proxy_status,
+        proxy_availability=proxy_metadata.proxy_availability,
+        proxy_availability_reason=proxy_metadata.proxy_availability_reason,
+        proxy_last_tested_at=proxy_metadata.proxy_last_tested_at,
+        proxy_last_test_error=proxy_metadata.proxy_last_test_error,
     )
+
+
+class _ProxyMetadata:
+    def __init__(
+        self,
+        *,
+        proxy_id: str | None,
+        proxy_display_name: str | None,
+        proxy_redacted_url: str | None,
+        proxy_status: str | None,
+        proxy_availability: str,
+        proxy_availability_reason: str,
+        proxy_last_tested_at: datetime | None,
+        proxy_last_test_error: str | None,
+    ) -> None:
+        self.proxy_id = proxy_id
+        self.proxy_display_name = proxy_display_name
+        self.proxy_redacted_url = proxy_redacted_url
+        self.proxy_status = proxy_status
+        self.proxy_availability = proxy_availability
+        self.proxy_availability_reason = proxy_availability_reason
+        self.proxy_last_tested_at = proxy_last_tested_at
+        self.proxy_last_test_error = proxy_last_test_error
+
+
+def _build_proxy_metadata(account: Account, encryptor: TokenEncryptor) -> _ProxyMetadata:
+    if account.proxy_id is None:
+        return _proxy_metadata(
+            proxy_id=None,
+            availability="direct",
+            reason="none",
+        )
+    proxy = account.proxy
+    if proxy is None:
+        return _proxy_metadata(
+            proxy_id=account.proxy_id,
+            availability="unavailable",
+            reason="proxy_missing",
+        )
+    try:
+        proxy_url = normalize_proxy_url(encryptor.decrypt(proxy.proxy_url_encrypted))
+    except Exception as exc:
+        reason = "proxy_invalid" if isinstance(exc, ProxyUrlValidationError) else "proxy_decrypt_failed"
+        return _proxy_metadata(
+            proxy_id=account.proxy_id,
+            proxy_display_name=proxy.display_name,
+            proxy_status=_proxy_status_value(proxy.status),
+            proxy_last_tested_at=proxy.last_tested_at,
+            proxy_last_test_error=proxy.last_test_error,
+            availability="unavailable",
+            reason=reason,
+        )
+
+    status = _proxy_status_value(proxy.status)
+    if status == AccountProxyStatus.FAILED.value:
+        availability = "unavailable"
+        reason = "proxy_failed"
+    elif status == AccountProxyStatus.UNTESTED.value:
+        availability = "warning"
+        reason = "proxy_untested"
+    elif status == AccountProxyStatus.TESTING.value and proxy.last_test_error is not None:
+        availability = "unavailable"
+        reason = "proxy_failed"
+    elif status == AccountProxyStatus.TESTING.value and proxy.last_tested_at is None:
+        availability = "warning"
+        reason = "proxy_untested"
+    else:
+        availability = "available"
+        reason = "none"
+    return _proxy_metadata(
+        proxy_id=account.proxy_id,
+        proxy_display_name=proxy.display_name,
+        proxy_redacted_url=redact_proxy_url(proxy_url),
+        proxy_status=status,
+        proxy_last_tested_at=proxy.last_tested_at,
+        proxy_last_test_error=proxy.last_test_error,
+        availability=availability,
+        reason=reason,
+    )
+
+
+def _proxy_metadata(
+    *,
+    proxy_id: str | None,
+    availability: str,
+    reason: str,
+    proxy_display_name: str | None = None,
+    proxy_redacted_url: str | None = None,
+    proxy_status: str | None = None,
+    proxy_last_tested_at: datetime | None = None,
+    proxy_last_test_error: str | None = None,
+) -> _ProxyMetadata:
+    return _ProxyMetadata(
+        proxy_id=proxy_id,
+        proxy_display_name=proxy_display_name,
+        proxy_redacted_url=proxy_redacted_url,
+        proxy_status=proxy_status,
+        proxy_availability=availability,
+        proxy_availability_reason=reason,
+        proxy_last_tested_at=proxy_last_tested_at,
+        proxy_last_test_error=proxy_last_test_error,
+    )
+
+
+def _proxy_status_value(status: AccountProxyStatus | str) -> str:
+    return status.value if isinstance(status, AccountProxyStatus) else str(status)
 
 
 def _limit_warmup_to_status(entry: AccountLimitWarmup | None) -> AccountLimitWarmupStatus | None:

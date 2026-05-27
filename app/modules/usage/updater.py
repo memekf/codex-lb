@@ -316,6 +316,7 @@ class UsageUpdater:
             payload = await fetch_usage(
                 access_token=access_token,
                 account_id=usage_account_id,
+                local_account_id=account.id,
             )
         except UsageFetchError as exc:
             if _should_deactivate_for_usage_error(exc):
@@ -334,6 +335,7 @@ class UsageUpdater:
                 payload = await fetch_usage(
                     access_token=access_token,
                     account_id=usage_account_id,
+                    local_account_id=account.id,
                 )
             except UsageFetchError as retry_exc:
                 if _should_deactivate_for_usage_error(retry_exc):

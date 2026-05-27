@@ -47,6 +47,7 @@ class DurableBridgeSessionSnapshot:
     account_id: str | None
     model: str | None
     service_tier: str | None
+    proxy_fingerprint: str | None
     latest_turn_state: str | None
     latest_response_id: str | None
     latest_input_item_count: int | None
@@ -162,6 +163,7 @@ class DurableBridgeRepository:
         account_id: str | None,
         model: str | None,
         service_tier: str | None,
+        proxy_fingerprint: str | None,
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
@@ -193,6 +195,7 @@ class DurableBridgeRepository:
                     account_id=account_id,
                     model=model,
                     service_tier=service_tier,
+                    proxy_fingerprint=proxy_fingerprint,
                     latest_turn_state=latest_turn_state,
                     latest_response_id=latest_response_id,
                     last_seen_at=now,
@@ -234,6 +237,7 @@ class DurableBridgeRepository:
                 existing.account_id = account_id
                 existing.model = model
                 existing.service_tier = service_tier
+                existing.proxy_fingerprint = proxy_fingerprint
                 if account_changed:
                     existing.latest_turn_state = latest_turn_state
                     existing.latest_response_id = latest_response_id
@@ -271,6 +275,7 @@ class DurableBridgeRepository:
         latest_response_id: str | None = None,
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
+        proxy_fingerprint: str | None = None,
         state: HttpBridgeSessionState | None = None,
     ) -> DurableBridgeSessionSnapshot | None:
         row = await self._session.get(HttpBridgeSessionRecord, session_id)
@@ -291,6 +296,8 @@ class DurableBridgeRepository:
         if latest_input_item_count is not None and latest_input_full_fingerprint is not None:
             row.latest_input_item_count = latest_input_item_count
             row.latest_input_full_fingerprint = latest_input_full_fingerprint
+        if proxy_fingerprint is not None:
+            row.proxy_fingerprint = proxy_fingerprint
         if state is not None:
             row.state = state
         await self._commit_writer_section()
@@ -472,6 +479,7 @@ def _to_snapshot(row: HttpBridgeSessionRecord | None) -> DurableBridgeSessionSna
         account_id=row.account_id,
         model=row.model,
         service_tier=row.service_tier,
+        proxy_fingerprint=row.proxy_fingerprint,
         latest_turn_state=row.latest_turn_state,
         latest_response_id=row.latest_response_id,
         latest_input_item_count=row.latest_input_item_count,

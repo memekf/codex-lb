@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 import aiohttp
 from aiohttp_retry import ExponentialRetry, RetryClient
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app.core.clients import account_proxy
 from app.core.clients.http import lease_retry_client
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
@@ -52,6 +55,7 @@ async def fetch_usage(
     timeout_seconds: float | None = None,
     max_retries: int | None = None,
     client: RetryClient | None = None,
+    local_account_id: str | None = None,
 ) -> UsagePayload:
     settings = get_settings()
     usage_base = base_url or settings.upstream_base_url
@@ -62,34 +66,34 @@ async def fetch_usage(
     retry_options = _retry_options(retries + 1)
 
     try:
-        async with lease_retry_client(client) as retry_client:
-            async with retry_client.request(
-                "GET",
-                url,
-                headers=headers,
-                timeout=timeout,
-                retry_options=retry_options,
-            ) as resp:
-                data = await _safe_json(resp)
-                if resp.status >= 400:
-                    code = _extract_error_code(data)
-                    message = _extract_error_message(data) or f"Usage fetch failed ({resp.status})"
-                    logger.warning(
-                        "Usage fetch failed request_id=%s status=%s code=%s message=%s",
-                        get_request_id(),
-                        resp.status,
-                        code,
-                        message,
-                    )
-                    raise UsageFetchError(resp.status, message, code=code)
-                try:
-                    return UsagePayload.model_validate(data)
-                except ValidationError as exc:
-                    logger.warning(
-                        "Usage fetch invalid payload request_id=%s",
-                        get_request_id(),
-                    )
-                    raise UsageFetchError(502, "Invalid usage payload") from exc
+        async with _usage_request_context(
+            local_account_id=local_account_id,
+            client=client,
+            url=url,
+            headers=headers,
+            timeout=timeout,
+            retry_options=retry_options,
+        ) as resp:
+            data = await _safe_json(resp)
+            if resp.status >= 400:
+                code = _extract_error_code(data)
+                message = _extract_error_message(data) or f"Usage fetch failed ({resp.status})"
+                logger.warning(
+                    "Usage fetch failed request_id=%s status=%s code=%s message=%s",
+                    get_request_id(),
+                    resp.status,
+                    code,
+                    message,
+                )
+                raise UsageFetchError(resp.status, message, code=code)
+            try:
+                return UsagePayload.model_validate(data)
+            except ValidationError as exc:
+                logger.warning(
+                    "Usage fetch invalid payload request_id=%s",
+                    get_request_id(),
+                )
+                raise UsageFetchError(502, "Invalid usage payload") from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         logger.warning(
             "Usage fetch error request_id=%s error=%s",
@@ -114,6 +118,39 @@ def _usage_headers(access_token: str, account_id: str | None) -> dict[str, str]:
     if account_id and not account_id.startswith(("email_", "local_")):
         headers["chatgpt-account-id"] = account_id
     return headers
+
+
+@asynccontextmanager
+async def _usage_request_context(
+    *,
+    local_account_id: str | None,
+    client: RetryClient | None,
+    url: str,
+    headers: dict[str, str],
+    timeout: aiohttp.ClientTimeout,
+    retry_options: ExponentialRetry,
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    if local_account_id is not None:
+        async with account_proxy.retry_request(
+            local_account_id,
+            "GET",
+            url,
+            client=client,
+            headers=headers,
+            timeout=timeout,
+            retry_options=retry_options,
+        ) as resp:
+            yield resp
+        return
+    async with lease_retry_client(client) as retry_client:
+        async with retry_client.request(
+            "GET",
+            url,
+            headers=headers,
+            timeout=timeout,
+            retry_options=retry_options,
+        ) as resp:
+            yield resp
 
 
 async def _safe_json(resp: aiohttp.ClientResponse) -> JsonObject:

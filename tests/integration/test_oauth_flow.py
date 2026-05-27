@@ -14,7 +14,7 @@ from app.core.auth import generate_unique_account_id
 from app.core.clients.oauth import DeviceCode, OAuthTokens
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account, AccountProxy, AccountProxyStatus, AccountStatus
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 
@@ -30,6 +30,70 @@ def _encode_jwt(payload: dict) -> str:
 def _oauth_state_token(authorization_url: str) -> str:
     parsed = urlparse(authorization_url)
     return parse_qs(parsed.query)["state"][0]
+
+
+async def _complete_device_reauth(
+    async_client,
+    monkeypatch,
+    *,
+    email: str,
+    raw_account_id: str,
+    proxy_id: str | None,
+) -> None:
+    async def fake_device_code(**_):
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="REAUTH",
+            device_auth_id=f"dev_{raw_account_id}",
+            interval_seconds=1,
+            expires_in_seconds=30,
+        )
+
+    async def fake_exchange_device_token(**_):
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token=f"access-{raw_account_id}",
+            refresh_token=f"refresh-{raw_account_id}",
+            id_token=_encode_jwt(payload),
+        )
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_async_sleep", fake_sleep)
+
+    settings = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "importWithoutOverwrite": False,
+            "totpRequiredOnLogin": False,
+        },
+    )
+    assert settings.status_code == 200
+
+    payload: dict[str, object] = {"forceMethod": "device"}
+    if proxy_id is not None:
+        payload["proxyId"] = proxy_id
+    start = await async_client.post("/api/oauth/start", json=payload)
+    assert start.status_code == 200
+    assert start.json()["method"] == "device"
+
+    await asyncio.sleep(0)
+    for _ in range(20):
+        status = await async_client.get("/api/oauth/status")
+        assert status.status_code == 200
+        if status.json()["status"] == "success":
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("device re-auth flow did not complete")
 
 
 @pytest.mark.asyncio
@@ -88,6 +152,162 @@ async def test_device_oauth_flow_creates_account(async_client, monkeypatch):
     assert accounts.status_code == 200
     data = accounts.json()["accounts"]
     assert any(account["accountId"] == expected_account_id for account in data)
+
+
+@pytest.mark.asyncio
+async def test_device_oauth_flow_uses_selected_proxy_and_persists_assignment(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    proxy = await async_client.post(
+        "/api/proxies",
+        json={"displayName": "OAuth egress", "proxyUrl": "https://user:secret@example.com:8443"},
+    )
+    assert proxy.status_code == 200
+    proxy_id = proxy.json()["id"]
+
+    email = "device-proxy@example.com"
+    raw_account_id = "acc_device_proxy"
+    seen_device_code_proxy_urls: list[str | None] = []
+    seen_token_proxy_urls: list[str | None] = []
+
+    async def fake_device_code(**kwargs):
+        seen_device_code_proxy_urls.append(kwargs.get("proxy_url"))
+        return DeviceCode(
+            verification_url="https://auth.openai.com/codex/device",
+            user_code="ABCD-EFGH",
+            device_auth_id="dev_proxy",
+            interval_seconds=1,
+            expires_in_seconds=30,
+        )
+
+    async def fake_exchange_device_token(**kwargs):
+        seen_token_proxy_urls.append(kwargs.get("proxy_url"))
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="access-token",
+            refresh_token="refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    async def fake_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
+    monkeypatch.setattr(oauth_module, "_async_sleep", fake_sleep)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "device", "proxyId": proxy_id})
+    assert start.status_code == 200
+    assert start.json()["method"] == "device"
+
+    await asyncio.sleep(0)
+    for _ in range(20):
+        status = await async_client.get("/api/oauth/status")
+        assert status.status_code == 200
+        if status.json()["status"] == "success":
+            break
+        await asyncio.sleep(0.05)
+
+    assert seen_device_code_proxy_urls == ["https://user:secret@example.com:8443"]
+    assert seen_token_proxy_urls == ["https://user:secret@example.com:8443"]
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    accounts = await async_client.get("/api/accounts")
+    assert accounts.status_code == 200
+    matched = next(account for account in accounts.json()["accounts"] if account["accountId"] == expected_account_id)
+    assert matched["proxyId"] == proxy_id
+
+
+@pytest.mark.asyncio
+async def test_device_oauth_reauth_changes_existing_proxy_assignment(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    proxy = await async_client.post(
+        "/api/proxies",
+        json={"displayName": "Reauth change", "proxyUrl": "https://reauth-change.example.com:8443"},
+    )
+    assert proxy.status_code == 200
+    proxy_id = proxy.json()["id"]
+
+    email = "reauth-change@example.com"
+    raw_account_id = "acc_reauth_change"
+    account_id = generate_unique_account_id(raw_account_id, email)
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(
+            Account(
+                id=account_id,
+                chatgpt_account_id=raw_account_id,
+                email=email,
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("old-access"),
+                refresh_token_encrypted=encryptor.encrypt("old-refresh"),
+                id_token_encrypted=encryptor.encrypt("old-id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                proxy_id=None,
+            )
+        )
+        await session.commit()
+
+    await _complete_device_reauth(
+        async_client,
+        monkeypatch,
+        email=email,
+        raw_account_id=raw_account_id,
+        proxy_id=proxy_id,
+    )
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.proxy_id == proxy_id
+
+
+@pytest.mark.asyncio
+async def test_device_oauth_reauth_clears_existing_proxy_assignment(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    proxy_id = "reauth-clear-proxy"
+    email = "reauth-clear@example.com"
+    raw_account_id = "acc_reauth_clear"
+    account_id = generate_unique_account_id(raw_account_id, email)
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        session.add(
+            AccountProxy(
+                id=proxy_id,
+                display_name="Reauth clear",
+                proxy_url_encrypted=encryptor.encrypt("https://reauth-clear.example.com:8443"),
+                status=AccountProxyStatus.WORKING,
+            )
+        )
+        session.add(
+            Account(
+                id=account_id,
+                chatgpt_account_id=raw_account_id,
+                email=email,
+                plan_type="plus",
+                access_token_encrypted=encryptor.encrypt("old-access"),
+                refresh_token_encrypted=encryptor.encrypt("old-refresh"),
+                id_token_encrypted=encryptor.encrypt("old-id"),
+                last_refresh=utcnow(),
+                status=AccountStatus.ACTIVE,
+                proxy_id=proxy_id,
+            )
+        )
+        await session.commit()
+
+    await _complete_device_reauth(async_client, monkeypatch, email=email, raw_account_id=raw_account_id, proxy_id=None)
+
+    async with SessionLocal() as session:
+        account = await session.get(Account, account_id)
+        assert account is not None
+        assert account.proxy_id is None
 
 
 @pytest.mark.asyncio
@@ -519,7 +739,7 @@ async def test_callback_server_remains_reserved_until_stop_completes():
 async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkeypatch):
     await oauth_module._OAUTH_STORE.reset()
 
-    async def fake_browser_flow(self):
+    async def fake_browser_flow(self, *_):
         raise OSError("no port")
 
     async def fake_device_code(**_):
@@ -531,14 +751,19 @@ async def test_oauth_start_falls_back_to_device_on_os_error(async_client, monkey
             expires_in_seconds=30,
         )
 
+    async def fake_exchange_device_token(**_):
+        return None
+
     monkeypatch.setattr(oauth_module.OauthService, "_start_browser_flow", fake_browser_flow)
     monkeypatch.setattr(oauth_module, "request_device_code", fake_device_code)
+    monkeypatch.setattr(oauth_module, "exchange_device_token", fake_exchange_device_token)
 
     start = await async_client.post("/api/oauth/start", json={})
     assert start.status_code == 200
     payload = start.json()
     assert payload["method"] == "device"
     assert payload["deviceAuthId"] == "dev_fallback"
+    await oauth_module._OAUTH_STORE.reset()
 
 
 @pytest.mark.asyncio
@@ -592,6 +817,69 @@ async def test_manual_callback_returns_success_and_creates_account(async_client,
     assert accounts.status_code == 200
     data = accounts.json()["accounts"]
     assert any(account["accountId"] == expected_account_id for account in data)
+
+
+@pytest.mark.asyncio
+async def test_browser_oauth_callback_uses_selected_proxy_and_persists_assignment(async_client, monkeypatch):
+    await oauth_module._OAUTH_STORE.reset()
+
+    proxy = await async_client.post(
+        "/api/proxies",
+        json={"displayName": "Browser egress", "proxyUrl": "https://browser:secret@example.com:8443"},
+    )
+    assert proxy.status_code == 200
+    proxy_id = proxy.json()["id"]
+
+    async def fake_callback_server_start(self) -> None:
+        return None
+
+    email = "manual-proxy@example.com"
+    raw_account_id = "acc_manual_proxy"
+    seen_proxy_urls: list[str | None] = []
+
+    async def fake_exchange_authorization_code(**kwargs):
+        seen_proxy_urls.append(kwargs.get("proxy_url"))
+        payload = {
+            "email": email,
+            "chatgpt_account_id": raw_account_id,
+            "https://api.openai.com/auth": {"chatgpt_plan_type": "plus"},
+        }
+        return OAuthTokens(
+            access_token="manual-access-token",
+            refresh_token="manual-refresh-token",
+            id_token=_encode_jwt(payload),
+        )
+
+    monkeypatch.setattr(oauth_module.OAuthCallbackServer, "start", fake_callback_server_start)
+    monkeypatch.setattr(oauth_module, "exchange_authorization_code", fake_exchange_authorization_code)
+
+    start = await async_client.post("/api/oauth/start", json={"forceMethod": "browser", "proxyId": proxy_id})
+    assert start.status_code == 200
+    payload = start.json()
+    assert payload["method"] == "browser"
+
+    async with oauth_module._OAUTH_STORE.lock:
+        state_token = oauth_module._OAUTH_STORE.state.state_token
+        flow = oauth_module._OAUTH_STORE.get_flow_locked(payload["flowId"])
+        assert flow is not None
+        assert flow.proxy_id == proxy_id
+        assert flow.proxy_url == "https://browser:secret@example.com:8443"
+        assert flow.proxy_fingerprint is not None
+
+    response = await async_client.post(
+        "/api/oauth/manual-callback",
+        json={
+            "callbackUrl": f"http://localhost:1455/auth/callback?code=manual-code&state={state_token}",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "success", "errorMessage": None}
+    assert seen_proxy_urls == ["https://browser:secret@example.com:8443"]
+
+    expected_account_id = generate_unique_account_id(raw_account_id, email)
+    accounts = await async_client.get("/api/accounts")
+    matched = next(account for account in accounts.json()["accounts"] if account["accountId"] == expected_account_id)
+    assert matched["proxyId"] == proxy_id
 
 
 @pytest.mark.asyncio

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from app.core.auth import OpenAIAuthClaims, extract_id_token_claims
 from app.core.auth.models import OAuthTokenPayload
 from app.core.balancer import PERMANENT_FAILURE_CODES
+from app.core.clients import account_proxy
 from app.core.clients.http import lease_http_session
 from app.core.config.settings import get_settings
 from app.core.types import JsonObject
@@ -63,6 +64,7 @@ async def refresh_access_token(
     refresh_token: str,
     *,
     session: aiohttp.ClientSession | None = None,
+    local_account_id: str | None = None,
 ) -> TokenRefreshResult:
     settings = get_settings()
     url = f"{settings.auth_base_url.rstrip('/')}/oauth/token"
@@ -80,7 +82,19 @@ async def refresh_access_token(
         headers["x-request-id"] = request_id
     try:
         async with lease_http_session(session) as client_session:
-            async with client_session.post(url, json=payload, headers=headers, timeout=timeout) as resp:
+            request_context = (
+                account_proxy.post(
+                    local_account_id,
+                    url,
+                    session=client_session,
+                    json=payload,
+                    headers=headers,
+                    timeout=timeout,
+                )
+                if local_account_id is not None
+                else client_session.post(url, json=payload, headers=headers, timeout=timeout)
+            )
+            async with request_context as resp:
                 data = await _safe_json(resp)
                 try:
                     payload_data = OAuthTokenPayload.model_validate(data)
@@ -99,6 +113,12 @@ async def refresh_access_token(
                     raise _refresh_error_from_payload(payload_data, resp.status)
     except RefreshError:
         raise
+    except account_proxy.AccountProxyTransportError as exc:
+        raise RefreshError(
+            "proxy_unavailable",
+            account_proxy.redact_transport_error(exc),
+            False,
+        ) from exc
     except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
         message = str(exc) or exc.__class__.__name__
         raise RefreshError(

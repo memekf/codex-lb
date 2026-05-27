@@ -36,6 +36,7 @@ from aiohttp.client_ws import DEFAULT_WS_CLIENT_TIMEOUT, WebSocketDataQueue
 from aiohttp.http_websocket import WS_KEY, WebSocketReader, WebSocketWriter
 from multidict import CIMultiDict
 
+from app.core.clients import account_proxy
 from app.core.clients.http import acquire_http_client, lease_http_session
 from app.core.config.settings import Settings, get_settings
 from app.core.conversation_archive import archive_json, archive_text
@@ -349,6 +350,24 @@ class ProxyResponseError(Exception):
         self.failure_detail = failure_detail
         self.failure_exception_type = failure_exception_type
         self.upstream_status_code = upstream_status_code
+
+
+class _WebSocketResponseContext:
+    def __init__(self, websocket: aiohttp.ClientWebSocketResponse) -> None:
+        self._websocket = websocket
+
+    async def __aenter__(self) -> aiohttp.ClientWebSocketResponse:
+        return self._websocket
+
+    async def __aexit__(self, *_: object) -> None:
+        await self._websocket.close()
+
+
+def _account_proxy_transport_error(exc: account_proxy.AccountProxyTransportError) -> ProxyResponseError:
+    return ProxyResponseError(
+        502,
+        openai_error("upstream_unavailable", exc.message, error_type="server_error"),
+    )
 
 
 @dataclass(frozen=True)
@@ -1119,6 +1138,7 @@ async def _open_upstream_websocket(
     connect_timeout_seconds: float,
     max_msg_size: int,
     account_id: str | None = None,
+    local_account_id: str | None = None,
     hold_half_open_probe: bool = False,
 ) -> tuple[AsyncContextManager[aiohttp.ClientWebSocketResponse], aiohttp.ClientWebSocketResponse]:
     settings = get_settings()
@@ -1126,6 +1146,33 @@ async def _open_upstream_websocket(
     is_probe = False
     if circuit_breaker is not None:
         is_probe = await circuit_breaker.pre_call_check()
+
+    if local_account_id is not None:
+        try:
+            websocket = await account_proxy.ws_connect(
+                local_account_id,
+                url,
+                session=session,
+                headers=headers,
+                receive_timeout=None,
+                autoping=True,
+                autoclose=True,
+                max_msg_size=max_msg_size,
+            )
+            if hold_half_open_probe and is_probe and circuit_breaker is not None:
+                _bind_half_open_probe(websocket, circuit_breaker)
+            return _WebSocketResponseContext(websocket), websocket
+        except account_proxy.AccountProxyTransportError as exc:
+            if circuit_breaker is not None:
+                await circuit_breaker._record_failure(exc)
+            raise _account_proxy_transport_error(exc) from exc
+        except Exception as exc:
+            if circuit_breaker is not None:
+                await circuit_breaker._record_failure(exc)
+            raise
+        finally:
+            if is_probe and circuit_breaker is not None and not hold_half_open_probe:
+                await circuit_breaker.release_half_open_probe()
 
     request_obj = getattr(session, "request", None)
     if not callable(request_obj):
@@ -1317,6 +1364,7 @@ async def _stream_responses_via_websocket(
     max_event_bytes: int,
     raise_for_status: bool,
     account_id: str | None = None,
+    local_account_id: str | None = None,
 ) -> AsyncIterator[str]:
     websocket_url = _to_websocket_upstream_url(url)
     request_started_at = time.monotonic()
@@ -1356,6 +1404,7 @@ async def _stream_responses_via_websocket(
         connect_timeout_seconds=connect_timeout_seconds,
         max_msg_size=max_event_bytes,
         account_id=account_id,
+        local_account_id=local_account_id,
         hold_half_open_probe=True,
     )
 
@@ -1883,8 +1932,45 @@ class ImageFetchSession(Protocol):
     ) -> AsyncContextManager[ImageFetchResponse]: ...
 
 
+@dataclass(slots=True)
+class _AccountImageFetchSession:
+    session: aiohttp.ClientSession
+    local_account_id: str
+
+    def get(
+        self,
+        url: str,
+        timeout: aiohttp.ClientTimeout,
+        *,
+        allow_redirects: bool = False,
+        headers: Mapping[str, str] | None = None,
+        server_hostname: str | None = None,
+    ) -> AsyncContextManager[ImageFetchResponse]:
+        return cast(
+            AsyncContextManager[ImageFetchResponse],
+            account_proxy.get(
+                self.local_account_id,
+                url,
+                session=self.session,
+                timeout=timeout,
+                allow_redirects=allow_redirects,
+                headers=headers,
+                server_hostname=server_hostname,
+            ),
+        )
+
+
 def _as_image_fetch_session(session: aiohttp.ClientSession) -> ImageFetchSession:
     return cast(ImageFetchSession, session)
+
+
+def _image_fetch_session(
+    session: aiohttp.ClientSession,
+    local_account_id: str | None,
+) -> ImageFetchSession:
+    if local_account_id is None:
+        return _as_image_fetch_session(session)
+    return _AccountImageFetchSession(session=session, local_account_id=local_account_id)
 
 
 async def stream_responses(
@@ -1896,6 +1982,7 @@ async def stream_responses(
     raise_for_status: bool = False,
     session: aiohttp.ClientSession | None = None,
     upstream_stream_transport_override: str | None = None,
+    local_account_id: str | None = None,
 ) -> AsyncIterator[str]:
     async with lease_http_session(session) as client_session:
         async for event_block in _stream_responses_with_session(
@@ -1907,6 +1994,7 @@ async def stream_responses(
             raise_for_status=raise_for_status,
             session=client_session,
             upstream_stream_transport_override=upstream_stream_transport_override,
+            local_account_id=local_account_id,
         ):
             yield event_block
 
@@ -1920,6 +2008,7 @@ async def _stream_responses_with_session(
     base_url: str | None = None,
     raise_for_status: bool = False,
     upstream_stream_transport_override: str | None = None,
+    local_account_id: str | None = None,
 ) -> AsyncIterator[str]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -1945,7 +2034,7 @@ async def _stream_responses_with_session(
     if settings.image_inline_fetch_enabled:
         payload_dict = await _inline_input_image_urls(
             payload_dict,
-            _as_image_fetch_session(client_session),
+            _image_fetch_session(client_session, local_account_id),
             effective_connect_timeout,
         )
     payload_json = json.dumps(payload_dict, ensure_ascii=True, separators=(",", ":"))
@@ -1988,11 +2077,22 @@ async def _stream_responses_with_session(
         nonlocal status_code, last_stream_activity_at, error_code, error_message, seen_terminal
 
         async with _service_circuit_breaker_context(
-            client_session.post(
-                url,
-                json=payload_dict,
-                headers=current_headers,
-                timeout=current_timeout,
+            (
+                account_proxy.post(
+                    local_account_id,
+                    url,
+                    session=client_session,
+                    json=payload_dict,
+                    headers=current_headers,
+                    timeout=current_timeout,
+                )
+                if local_account_id is not None
+                else client_session.post(
+                    url,
+                    json=payload_dict,
+                    headers=current_headers,
+                    timeout=current_timeout,
+                )
             ),
             settings=settings,
             account_id=account_id,
@@ -2094,6 +2194,7 @@ async def _stream_responses_with_session(
                     max_event_bytes=settings.max_sse_event_bytes,
                     raise_for_status=raise_for_status,
                     account_id=account_id,
+                    local_account_id=local_account_id,
                 ):
                     if status_code is None:
                         status_code = 101
@@ -2205,6 +2306,13 @@ async def _stream_responses_with_session(
         error_message = "Upstream circuit breaker is open"
         yield format_sse_event(
             response_failed_event("upstream_unavailable", error_message, response_id=get_request_id()),
+        )
+        return
+    except account_proxy.AccountProxyTransportError as exc:
+        error_code = "upstream_unavailable"
+        error_message = exc.message
+        yield format_sse_event(
+            response_failed_event("upstream_unavailable", exc.message, response_id=get_request_id()),
         )
         return
     except aiohttp.ClientError as exc:
@@ -2388,6 +2496,7 @@ async def compact_responses(
     access_token: str,
     account_id: str | None,
     session: aiohttp.ClientSession | None = None,
+    local_account_id: str | None = None,
 ) -> CompactResponsePayload:
     async with lease_http_session(session) as client_session:
         transport = _CompactCommandTransport(
@@ -2396,6 +2505,7 @@ async def compact_responses(
             access_token=access_token,
             account_id=account_id,
             session=client_session,
+            local_account_id=local_account_id,
         )
         return await transport.execute()
 
@@ -2411,6 +2521,7 @@ class _CompactCommandTransport:
     access_token: str
     account_id: str | None
     session: aiohttp.ClientSession
+    local_account_id: str | None = None
 
     async def execute(self) -> CompactResponsePayload:
         settings = get_settings()
@@ -2429,7 +2540,7 @@ class _CompactCommandTransport:
         if settings.image_inline_fetch_enabled:
             payload_dict = await _inline_input_image_urls(
                 payload_dict,
-                _as_image_fetch_session(self.session),
+                _image_fetch_session(self.session, self.local_account_id),
                 effective_connect_timeout,
             )
         now = time.monotonic()
@@ -2483,11 +2594,22 @@ class _CompactCommandTransport:
         )
         try:
             async with _service_circuit_breaker_context(
-                self.session.post(
-                    url,
-                    json=payload_dict,
-                    headers=upstream_headers,
-                    timeout=timeout,
+                (
+                    account_proxy.post(
+                        self.local_account_id,
+                        url,
+                        session=self.session,
+                        json=payload_dict,
+                        headers=upstream_headers,
+                        timeout=timeout,
+                    )
+                    if self.local_account_id is not None
+                    else self.session.post(
+                        url,
+                        json=payload_dict,
+                        headers=upstream_headers,
+                        timeout=timeout,
+                    )
                 ),
                 settings=settings,
                 account_id=self.account_id,
@@ -2601,6 +2723,14 @@ class _CompactCommandTransport:
                 failure_detail=failure_detail,
                 failure_exception_type=failure_exception_type,
             ) from exc
+        except account_proxy.AccountProxyTransportError as exc:
+            error_code = "upstream_unavailable"
+            error_message = exc.message
+            failure_phase = "connect"
+            failure_detail = exc.message
+            failure_exception_type = type(exc).__name__
+            retryable_same_contract = True
+            raise _account_proxy_transport_error(exc) from exc
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             message = str(exc) or "Request to upstream timed out"
             error_code = "upstream_unavailable"
@@ -2646,6 +2776,7 @@ async def thread_goal_request(
     timeout_seconds: float | None = None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    local_account_id: str | None = None,
 ) -> dict[str, JsonValue]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2697,7 +2828,11 @@ async def thread_goal_request(
         else:
             request_kwargs["json"] = payload_dict
         async with _service_circuit_breaker_context(
-            client_session.request(request_method, url, **request_kwargs),
+            (
+                account_proxy.request(local_account_id, request_method, url, session=client_session, **request_kwargs)
+                if local_account_id is not None
+                else client_session.request(request_method, url, **request_kwargs)
+            ),
             settings=settings,
             account_id=account_id,
         ) as resp:
@@ -2730,6 +2865,10 @@ async def thread_goal_request(
         error_code = "upstream_unavailable"
         error_message = "Upstream circuit breaker is open"
         raise ProxyResponseError(503, openai_error("upstream_unavailable", error_message)) from exc
+    except account_proxy.AccountProxyTransportError as exc:
+        error_code = "upstream_unavailable"
+        error_message = exc.message
+        raise _account_proxy_transport_error(exc) from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         message = str(exc) or "Request to upstream timed out"
         error_code = "upstream_unavailable"
@@ -2764,6 +2903,7 @@ async def codex_control_request(
     timeout_seconds: float | None = None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    local_account_id: str | None = None,
 ) -> CodexControlResponse:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2819,13 +2959,26 @@ async def codex_control_request(
     )
     try:
         async with _service_circuit_breaker_context(
-            client_session.request(
-                request_method,
-                url,
-                params=query_params,
-                data=payload,
-                headers=upstream_headers,
-                timeout=timeout,
+            (
+                account_proxy.request(
+                    local_account_id,
+                    request_method,
+                    url,
+                    session=client_session,
+                    params=query_params,
+                    data=payload,
+                    headers=upstream_headers,
+                    timeout=timeout,
+                )
+                if local_account_id is not None
+                else client_session.request(
+                    request_method,
+                    url,
+                    params=query_params,
+                    data=payload,
+                    headers=upstream_headers,
+                    timeout=timeout,
+                )
             ),
             settings=settings,
             account_id=account_id,
@@ -2849,6 +3002,10 @@ async def codex_control_request(
         error_code = "upstream_unavailable"
         error_message = "Upstream circuit breaker is open"
         raise ProxyResponseError(503, openai_error("upstream_unavailable", error_message)) from exc
+    except account_proxy.AccountProxyTransportError as exc:
+        error_code = "upstream_unavailable"
+        error_message = exc.message
+        raise _account_proxy_transport_error(exc) from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         message = str(exc) or "Request to upstream timed out"
         error_code = "upstream_unavailable"
@@ -2882,6 +3039,7 @@ async def transcribe_audio(
     account_id: str | None,
     base_url: str | None = None,
     session: aiohttp.ClientSession | None = None,
+    local_account_id: str | None = None,
 ) -> dict[str, JsonValue]:
     async with lease_http_session(session) as client_session:
         return await _transcribe_audio_with_session(
@@ -2894,6 +3052,7 @@ async def transcribe_audio(
             account_id=account_id,
             base_url=base_url,
             session=client_session,
+            local_account_id=local_account_id,
         )
 
 
@@ -2908,6 +3067,7 @@ async def _transcribe_audio_with_session(
     account_id: str | None,
     session: aiohttp.ClientSession,
     base_url: str | None = None,
+    local_account_id: str | None = None,
 ) -> dict[str, JsonValue]:
     settings = get_settings()
     upstream_base = (base_url or settings.upstream_base_url).rstrip("/")
@@ -2968,11 +3128,22 @@ async def _transcribe_audio_with_session(
     )
     try:
         async with _service_circuit_breaker_context(
-            client_session.post(
-                url,
-                data=form,
-                headers=upstream_headers,
-                timeout=timeout,
+            (
+                account_proxy.post(
+                    local_account_id,
+                    url,
+                    session=client_session,
+                    data=form,
+                    headers=upstream_headers,
+                    timeout=timeout,
+                )
+                if local_account_id is not None
+                else client_session.post(
+                    url,
+                    data=form,
+                    headers=upstream_headers,
+                    timeout=timeout,
+                )
             ),
             settings=settings,
             account_id=account_id,
@@ -3016,6 +3187,10 @@ async def _transcribe_audio_with_session(
             503,
             openai_error("upstream_unavailable", error_message),
         ) from exc
+    except account_proxy.AccountProxyTransportError as exc:
+        error_code = "upstream_unavailable"
+        error_message = exc.message
+        raise _account_proxy_transport_error(exc) from exc
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         message = str(exc) or "Request to upstream timed out"
         error_code = "upstream_unavailable"

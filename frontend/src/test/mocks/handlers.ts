@@ -75,6 +75,15 @@ const AccountAliasPayloadSchema = z.object({
 	alias: z.string().max(255).nullable(),
 });
 
+const AccountProxyPayloadSchema = z.object({
+	displayName: z.string().min(1),
+	proxyUrl: z.string().min(1),
+});
+
+const AccountProxyAssignmentPayloadSchema = z.object({
+	proxyId: z.string().nullable(),
+});
+
 const SettingsPayloadSchema = z
 	.object({
 		stickyThreadsEnabled: z.boolean().optional(),
@@ -112,6 +121,17 @@ type MockState = {
 	authSession: DashboardAuthSession;
 	settings: DashboardSettings;
 	apiKeys: ApiKey[];
+	proxies: Array<{
+		id: string;
+		displayName: string;
+		redactedProxyUrl: string;
+		status: "untested" | "working" | "failed";
+		lastTestedAt: string | null;
+		lastTestError: string | null;
+		lastTestLatencyMs: number | null;
+		createdAt: string;
+		updatedAt: string;
+	}>;
 	firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
 	stickySessions: Array<{
 		key: string;
@@ -131,6 +151,19 @@ function createInitialState(): MockState {
 		authSession: createDashboardAuthSession(),
 		settings: createDashboardSettings(),
 		apiKeys: createDefaultApiKeys(),
+		proxies: [
+			{
+				id: "proxy_primary",
+				displayName: "Primary proxy",
+				redactedProxyUrl: "https://user:***@proxy.example.com:8443",
+				status: "working",
+				lastTestedAt: new Date(Date.now() - 60_000).toISOString(),
+				lastTestError: null,
+				lastTestLatencyMs: 42,
+				createdAt: new Date(Date.now() - 3600_000).toISOString(),
+				updatedAt: new Date(Date.now() - 60_000).toISOString(),
+			},
+		],
 		firewallEntries: [],
 		stickySessions: [],
 	};
@@ -359,6 +392,91 @@ export const handlers = [
 		return HttpResponse.json({ accounts: state.accounts });
 	}),
 
+	http.get("/api/proxies", () => {
+		return HttpResponse.json({ proxies: state.proxies });
+	}),
+
+	http.post("/api/proxies", async ({ request }) => {
+		const payload = await parseJsonBody(request, AccountProxyPayloadSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "validation_error", message: "Invalid proxy payload" } },
+				{ status: 422 },
+			);
+		}
+		const now = new Date().toISOString();
+		const proxy = {
+			id: `proxy_${state.proxies.length + 1}`,
+			displayName: payload.displayName,
+			redactedProxyUrl: payload.proxyUrl.replace(/:\/\/([^:@/]+):([^@/]+)@/, "://$1:***@"),
+			status: "untested" as const,
+			lastTestedAt: null,
+			lastTestError: null,
+			lastTestLatencyMs: null,
+			createdAt: now,
+			updatedAt: now,
+		};
+		state.proxies = [proxy, ...state.proxies];
+		return HttpResponse.json(proxy);
+	}),
+
+	http.post("/api/proxies/test", async ({ request }) => {
+		const payload = await parseJsonBody(request, z.object({ proxyUrl: z.string().min(1) }));
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "validation_error", message: "Invalid proxy test payload" } },
+				{ status: 422 },
+			);
+		}
+		return HttpResponse.json({
+			status: "working",
+			lastTestedAt: new Date().toISOString(),
+			lastTestError: null,
+			lastTestLatencyMs: 38,
+		});
+	}),
+
+	http.post("/api/proxies/:proxyId/test", ({ params }) => {
+		const proxy = state.proxies.find((item) => item.id === String(params.proxyId));
+		if (!proxy) {
+			return HttpResponse.json(
+				{ error: { code: "proxy_not_found", message: "Proxy not found" } },
+				{ status: 404 },
+			);
+		}
+		proxy.status = "working";
+		proxy.lastTestedAt = new Date().toISOString();
+		proxy.lastTestError = null;
+		proxy.lastTestLatencyMs = 38;
+		return HttpResponse.json(proxy);
+	}),
+
+	http.put("/api/proxies/:proxyId", async ({ params, request }) => {
+		const proxy = state.proxies.find((item) => item.id === String(params.proxyId));
+		if (!proxy) {
+			return HttpResponse.json(
+				{ error: { code: "proxy_not_found", message: "Proxy not found" } },
+				{ status: 404 },
+			);
+		}
+		const payload = await parseJsonBody(request, AccountProxyPayloadSchema);
+		if (!payload) {
+			return HttpResponse.json(
+				{ error: { code: "validation_error", message: "Invalid proxy payload" } },
+				{ status: 422 },
+			);
+		}
+		proxy.displayName = payload.displayName;
+		proxy.redactedProxyUrl = payload.proxyUrl.replace(/:\/\/([^:@/]+):([^@/]+)@/, "://$1:***@");
+		proxy.updatedAt = new Date().toISOString();
+		return HttpResponse.json(proxy);
+	}),
+
+	http.delete("/api/proxies/:proxyId", ({ params }) => {
+		state.proxies = state.proxies.filter((item) => item.id !== String(params.proxyId));
+		return HttpResponse.json({ status: "deleted" });
+	}),
+
 	http.post("/api/accounts/import", async () => {
 		const sequence = state.accounts.length + 1;
 		const created = createAccountSummary({
@@ -422,6 +540,26 @@ export const handlers = [
 		account.alias = normalized === "" ? null : normalized;
 		account.displayName = account.alias ?? account.email;
 		return HttpResponse.json({ accountId, alias: account.alias });
+	}),
+
+	http.put("/api/accounts/:accountId/proxy", async ({ params, request }) => {
+		const accountId = String(params.accountId);
+		const account = findAccount(accountId);
+		const payload = await parseJsonBody(request, AccountProxyAssignmentPayloadSchema);
+		if (!account || !payload) {
+			return HttpResponse.json(
+				{ error: { code: "account_not_found", message: "Account not found" } },
+				{ status: 404 },
+			);
+		}
+		const proxy = payload.proxyId ? state.proxies.find((item) => item.id === payload.proxyId) : null;
+		account.proxyId = payload.proxyId;
+		account.proxyDisplayName = proxy?.displayName ?? null;
+		account.proxyRedactedUrl = proxy?.redactedProxyUrl ?? null;
+		account.proxyStatus = proxy?.status ?? null;
+		account.proxyAvailability = proxy ? "available" : "direct";
+		account.proxyAvailabilityReason = proxy ? "proxy_working" : "none";
+		return HttpResponse.json({ status: "updated", proxyId: payload.proxyId });
 	}),
 
 	http.put("/api/accounts/:accountId/limit-warmup", async ({ params, request }) => {

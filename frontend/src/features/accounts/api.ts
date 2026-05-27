@@ -8,6 +8,8 @@ import {
   AccountImportResponseSchema,
   AccountLimitWarmupUpdateRequestSchema,
   AccountLimitWarmupUpdateResponseSchema,
+  AccountProxyAssignmentRequestSchema,
+  AccountProxyAssignmentResponseSchema,
   AccountsResponseSchema,
   AccountTrendsResponseSchema,
   ManualOauthCallbackRequestSchema,
@@ -63,6 +65,15 @@ export function updateAccountLimitWarmup(accountId: string, enabled: boolean) {
   return put(
     `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/limit-warmup`,
     AccountLimitWarmupUpdateResponseSchema,
+    { body: payload },
+  );
+}
+
+export function setAccountProxy(accountId: string, proxyId: string | null) {
+  const payload = AccountProxyAssignmentRequestSchema.parse({ proxyId });
+  return put(
+    `${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/proxy`,
+    AccountProxyAssignmentResponseSchema,
     { body: payload },
   );
 }

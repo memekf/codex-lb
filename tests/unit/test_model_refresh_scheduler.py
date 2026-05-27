@@ -119,6 +119,47 @@ async def test_refresh_access_token_marks_transport_errors(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_refresh_access_token_uses_account_proxy_transport_when_local_account_is_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, object] = {}
+
+    class Response:
+        status = 200
+
+        async def json(self, *, content_type: str | None = None) -> object:
+            del content_type
+            return {}
+
+    @contextlib.asynccontextmanager
+    async def account_post(local_account_id: str, url: str, **kwargs: object):
+        seen.update(local_account_id=local_account_id, url=url, kwargs=kwargs)
+        yield Response()
+
+    monkeypatch.setattr(refresh_module.account_proxy, "post", account_post)
+    monkeypatch.setattr(
+        refresh_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            auth_base_url="https://auth.example.test",
+            oauth_client_id="client-id",
+            oauth_scope="openid profile",
+            token_refresh_timeout_seconds=15.0,
+        ),
+    )
+
+    with pytest.raises(refresh_module.RefreshError):
+        await refresh_module.refresh_access_token(
+            "refresh-token",
+            session=MagicMock(),
+            local_account_id="local-account",
+        )
+
+    assert seen["local_account_id"] == "local-account"
+    assert seen["url"] == "https://auth.example.test/oauth/token"
+
+
+@pytest.mark.asyncio
 async def test_fetch_with_failover_refreshes_http_client_after_transport_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -144,6 +185,7 @@ async def test_fetch_with_failover_refreshes_http_client_after_transport_error(
     assert result == expected_models
     refresh_http_client.assert_awaited_once()
     assert fetch_models_for_plan.await_count == 2
+    assert all(call.kwargs == {"local_account_id": "account-1"} for call in fetch_models_for_plan.await_args_list)
     assert encryptor.decrypt.call_count == 2
 
 

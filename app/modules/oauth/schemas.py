@@ -5,6 +5,7 @@ from app.modules.shared.schemas import DashboardModel
 
 class OauthStartRequest(DashboardModel):
     force_method: str | None = None
+    proxy_id: str | None = None
 
 
 class OauthStartResponse(DashboardModel):
