@@ -1,17 +1,24 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends
+from datetime import datetime
+
+from fastapi import APIRouter, Body, Depends, Query
 
 from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
 from app.core.exceptions import DashboardBadRequestError, DashboardConflictError, DashboardNotFoundError
 from app.dependencies import AccountActiveTimeframesContext, get_account_active_timeframes_context
 from app.modules.account_active_timeframes.schemas import (
+    AccountActiveTimeframeCoverageAccountResponse,
+    AccountActiveTimeframeCoverageResponse,
+    AccountActiveTimeframeCoverageSegmentResponse,
+    AccountActiveTimeframeCoverageSummaryResponse,
     AccountActiveTimeframeDeleteResponse,
     AccountActiveTimeframeResponse,
     AccountActiveTimeframesResponse,
     AccountActiveTimeframeUpsertRequest,
 )
 from app.modules.account_active_timeframes.service import (
+    AccountActiveTimeframeCoverageData,
     AccountActiveTimeframeData,
     AccountActiveTimeframeInUseError,
     AccountActiveTimeframeNotFoundError,
@@ -31,6 +38,19 @@ async def list_account_active_timeframes(
 ) -> AccountActiveTimeframesResponse:
     timeframes = await context.service.list()
     return AccountActiveTimeframesResponse(timeframes=[_to_response(timeframe) for timeframe in timeframes])
+
+
+@router.get("/coverage", response_model=AccountActiveTimeframeCoverageResponse)
+async def get_account_active_timeframe_coverage(
+    week_start: datetime | None = Query(default=None, alias="weekStart"),
+    include_always_active: bool = Query(default=True, alias="includeAlwaysActive"),
+    context: AccountActiveTimeframesContext = Depends(get_account_active_timeframes_context),
+) -> AccountActiveTimeframeCoverageResponse:
+    coverage = await context.service.weekly_coverage(
+        week_start=week_start,
+        include_always_active=include_always_active,
+    )
+    return _to_coverage_response(coverage)
 
 
 @router.post("", response_model=AccountActiveTimeframeResponse)
@@ -109,4 +129,34 @@ def _to_response(timeframe: AccountActiveTimeframeData) -> AccountActiveTimefram
         next_change_at=timeframe.next_change_at,
         created_at=timeframe.created_at,
         updated_at=timeframe.updated_at,
+    )
+
+
+def _to_coverage_response(coverage: AccountActiveTimeframeCoverageData) -> AccountActiveTimeframeCoverageResponse:
+    return AccountActiveTimeframeCoverageResponse(
+        week_start=coverage.week_start,
+        week_end=coverage.week_end,
+        segments=[
+            AccountActiveTimeframeCoverageSegmentResponse(
+                start=segment.start,
+                end=segment.end,
+                active_account_count=segment.active_account_count,
+                accounts=[
+                    AccountActiveTimeframeCoverageAccountResponse(
+                        account_id=account.account_id,
+                        label=account.label,
+                    )
+                    for account in segment.accounts
+                ],
+            )
+            for segment in coverage.segments
+        ],
+        summary=AccountActiveTimeframeCoverageSummaryResponse(
+            minimum_coverage=coverage.summary.minimum_coverage,
+            uncovered_minutes=coverage.summary.uncovered_minutes,
+            peak_coverage=coverage.summary.peak_coverage,
+            average_coverage=coverage.summary.average_coverage,
+            next_gap_start=coverage.summary.next_gap_start,
+            next_gap_end=coverage.summary.next_gap_end,
+        ),
     )

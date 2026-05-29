@@ -18,6 +18,7 @@ import {
 
 function invalidateAccountRelatedQueries(queryClient: ReturnType<typeof useQueryClient>) {
   void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
+  void queryClient.invalidateQueries({ queryKey: ["active-timeframes", "coverage"] });
   void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
 }
 

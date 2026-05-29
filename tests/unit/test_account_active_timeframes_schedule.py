@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from app.modules.account_active_timeframes.schedule import (
     ActiveTimeframeDefinition,
+    active_intervals_between,
     evaluate_active_timeframe,
     resolve_current_weekdays,
 )
@@ -76,6 +77,10 @@ def _seed_for_next_week_change(
         if resolve_current_weekdays(definition, now=next_week_date) == [next_weekday]:
             return seed
     raise AssertionError("could not find deterministic random seed")
+
+
+def _intervals_to_iso(intervals: list[tuple[datetime, datetime]]) -> list[tuple[str, str]]:
+    return [(start.isoformat(), end.isoformat()) for start, end in intervals]
 
 
 def test_missing_timeframe_is_always_available() -> None:
@@ -259,3 +264,127 @@ def test_invalid_timezone_fails_closed() -> None:
     assert evaluation.availability == "invalid"
     assert evaluation.reason == "timeframe_invalid"
     assert evaluation.next_change_at is None
+
+
+def test_active_intervals_between_returns_fixed_weekday_windows_clipped_to_range() -> None:
+    definition = ActiveTimeframeDefinition(
+        id="tf-fixed-range",
+        timezone="UTC",
+        start_minute=9 * 60,
+        end_minute=17 * 60,
+        mode="fixed_weekdays",
+        weekdays=[0, 2],
+    )
+
+    intervals = active_intervals_between(
+        definition,
+        start_at=_dt("2026-05-25T12:00:00"),
+        end_at=_dt("2026-05-28T12:00:00"),
+    )
+
+    assert _intervals_to_iso(intervals) == [
+        ("2026-05-25T12:00:00+00:00", "2026-05-25T17:00:00+00:00"),
+        ("2026-05-27T09:00:00+00:00", "2026-05-27T17:00:00+00:00"),
+    ]
+
+
+def test_active_intervals_between_resolves_random_days_per_candidate_iso_week() -> None:
+    definition = ActiveTimeframeDefinition(
+        id="tf-random-range",
+        timezone="UTC",
+        start_minute=9 * 60,
+        end_minute=17 * 60,
+        mode="random_weekly_days",
+        weekdays=[],
+        random_days_per_week=2,
+        random_seed="seed-a",
+    )
+    range_start = _dt("2026-05-25T00:00:00")
+    range_end = _dt("2026-06-08T00:00:00")
+    expected: list[tuple[str, str]] = []
+    local_day = range_start.date()
+    for _ in range(14):
+        current_weekdays = resolve_current_weekdays(
+            definition,
+            now=datetime.combine(local_day, datetime.min.time(), tzinfo=timezone.utc),
+        )
+        if local_day.weekday() in current_weekdays:
+            expected.append(
+                (
+                    f"{local_day.isoformat()}T09:00:00+00:00",
+                    f"{local_day.isoformat()}T17:00:00+00:00",
+                )
+            )
+        local_day = local_day.fromordinal(local_day.toordinal() + 1)
+
+    intervals = active_intervals_between(definition, start_at=range_start, end_at=range_end)
+
+    assert _intervals_to_iso(intervals) == expected
+    assert len(intervals) == 4
+
+
+def test_active_intervals_between_uses_previous_iso_week_for_overnight_sunday_boundary() -> None:
+    timeframe_id = "tf-random-range-overnight"
+    definition = _random_weekly_definition(
+        timeframe_id=timeframe_id,
+        seed=_seed_for_weekly_sunday_boundary(
+            timeframe_id=timeframe_id,
+            previous_week_includes_sunday=True,
+            current_week_includes_sunday=False,
+        ),
+        start_minute=22 * 60,
+        end_minute=6 * 60,
+    )
+
+    intervals = active_intervals_between(
+        definition,
+        start_at=_dt("2026-06-01T00:00:00"),
+        end_at=_dt("2026-06-02T00:00:00"),
+    )
+
+    assert _intervals_to_iso(intervals) == [
+        ("2026-06-01T00:00:00+00:00", "2026-06-01T06:00:00+00:00")
+    ]
+
+
+def test_active_intervals_between_projects_full_local_days() -> None:
+    definition = ActiveTimeframeDefinition(
+        id="tf-full-day-range",
+        timezone="UTC",
+        start_minute=0,
+        end_minute=0,
+        mode="fixed_weekdays",
+        weekdays=[1, 3],
+    )
+
+    intervals = active_intervals_between(
+        definition,
+        start_at=_dt("2026-05-25T00:00:00"),
+        end_at=_dt("2026-05-30T00:00:00"),
+    )
+
+    assert _intervals_to_iso(intervals) == [
+        ("2026-05-26T00:00:00+00:00", "2026-05-27T00:00:00+00:00"),
+        ("2026-05-28T00:00:00+00:00", "2026-05-29T00:00:00+00:00"),
+    ]
+
+
+def test_active_intervals_between_accepts_naive_range_boundaries_as_utc() -> None:
+    definition = ActiveTimeframeDefinition(
+        id="tf-naive-range",
+        timezone="UTC",
+        start_minute=9 * 60,
+        end_minute=17 * 60,
+        mode="fixed_weekdays",
+        weekdays=[0],
+    )
+
+    intervals = active_intervals_between(
+        definition,
+        start_at=datetime.fromisoformat("2026-05-25T10:00:00"),
+        end_at=datetime.fromisoformat("2026-05-25T12:00:00"),
+    )
+
+    assert _intervals_to_iso(intervals) == [
+        ("2026-05-25T10:00:00+00:00", "2026-05-25T12:00:00+00:00")
+    ]

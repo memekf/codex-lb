@@ -49,6 +49,7 @@ const EXPECTED_ENDPOINTS = [
 	"DELETE /api/proxies/:proxyId",
 	// active timeframes
 	"GET /api/active-timeframes",
+	"GET /api/active-timeframes/coverage",
 	"POST /api/active-timeframes",
 	"PUT /api/active-timeframes/:timeframeId",
 	"DELETE /api/active-timeframes/:timeframeId",

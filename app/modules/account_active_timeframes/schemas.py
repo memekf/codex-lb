@@ -47,3 +47,31 @@ class AccountActiveTimeframeUpsertRequest(DashboardModel):
 
 class AccountActiveTimeframeDeleteResponse(DashboardModel):
     status: str
+
+
+class AccountActiveTimeframeCoverageAccountResponse(DashboardModel):
+    account_id: str
+    label: str
+
+
+class AccountActiveTimeframeCoverageSegmentResponse(DashboardModel):
+    start: datetime
+    end: datetime
+    active_account_count: int
+    accounts: list[AccountActiveTimeframeCoverageAccountResponse] = Field(default_factory=list)
+
+
+class AccountActiveTimeframeCoverageSummaryResponse(DashboardModel):
+    minimum_coverage: int
+    uncovered_minutes: int
+    peak_coverage: int
+    average_coverage: float
+    next_gap_start: datetime | None = None
+    next_gap_end: datetime | None = None
+
+
+class AccountActiveTimeframeCoverageResponse(DashboardModel):
+    week_start: datetime
+    week_end: datetime
+    segments: list[AccountActiveTimeframeCoverageSegmentResponse] = Field(default_factory=list)
+    summary: AccountActiveTimeframeCoverageSummaryResponse

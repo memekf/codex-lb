@@ -118,6 +118,40 @@ def evaluate_active_timeframe(
         )
 
 
+def active_intervals_between(
+    definition: ActiveTimeframeDefinition,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+) -> list[tuple[datetime, datetime]]:
+    range_start = _ensure_aware_utc(start_at)
+    range_end = _ensure_aware_utc(end_at)
+    if range_end <= range_start:
+        return []
+
+    _validate_definition(definition)
+    tz = ZoneInfo(definition.timezone)
+    local_start = range_start.astimezone(tz)
+    local_end = range_end.astimezone(tz)
+    candidate_day = local_start.date() - timedelta(days=1)
+    final_candidate_day = local_end.date()
+    intervals: list[tuple[datetime, datetime]] = []
+
+    while candidate_day <= final_candidate_day:
+        weekdays = _weekdays_for_candidate_start_day(definition, candidate_day)
+        if candidate_day.weekday() in weekdays:
+            interval_start, interval_end = _interval_for_start_day(local_start, candidate_day, definition)
+            utc_start = interval_start.astimezone(timezone.utc)
+            utc_end = interval_end.astimezone(timezone.utc)
+            clipped_start = max(utc_start, range_start)
+            clipped_end = min(utc_end, range_end)
+            if clipped_start < clipped_end:
+                intervals.append((clipped_start, clipped_end))
+        candidate_day += timedelta(days=1)
+
+    return intervals
+
+
 def _validate_definition(definition: ActiveTimeframeDefinition) -> None:
     if not definition.weekdays_valid:
         raise ValueError("weekdays storage is invalid")

@@ -4,6 +4,7 @@ from collections.abc import Sequence
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db.models import Account, AccountActiveTimeframe
 
@@ -47,3 +48,11 @@ class AccountActiveTimeframeRepository:
             select(func.count(Account.id)).where(Account.active_timeframe_id == timeframe_id)
         )
         return int(result.scalar_one() or 0)
+
+    async def list_accounts_for_coverage(self) -> Sequence[Account]:
+        result = await self._session.execute(
+            select(Account)
+            .options(selectinload(Account.active_timeframe))
+            .order_by(Account.email, Account.id)
+        )
+        return list(result.scalars().all())

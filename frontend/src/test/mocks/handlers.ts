@@ -549,6 +549,51 @@ export const handlers = [
 		return HttpResponse.json({ timeframes: state.timeframes });
 	}),
 
+	http.get("/api/active-timeframes/coverage", ({ request }) => {
+		const url = new URL(request.url);
+		const includeAlwaysActive = url.searchParams.get("includeAlwaysActive") !== "false";
+		const alwaysAccount = { accountId: "acc_secondary", label: "secondary@example.com" };
+		const scheduledAccount = { accountId: "acc_primary", label: "primary@example.com" };
+		return HttpResponse.json({
+			weekStart: "2026-05-25T00:00:00Z",
+			weekEnd: "2026-06-01T00:00:00Z",
+			segments: [
+				{
+					start: "2026-05-25T00:00:00Z",
+					end: "2026-05-25T09:00:00Z",
+					activeAccountCount: includeAlwaysActive ? 1 : 0,
+					accounts: includeAlwaysActive ? [alwaysAccount] : [],
+				},
+				{
+					start: "2026-05-25T09:00:00Z",
+					end: "2026-05-25T13:00:00Z",
+					activeAccountCount: includeAlwaysActive ? 2 : 1,
+					accounts: includeAlwaysActive ? [scheduledAccount, alwaysAccount] : [scheduledAccount],
+				},
+				{
+					start: "2026-05-25T13:00:00Z",
+					end: "2026-05-25T17:00:00Z",
+					activeAccountCount: includeAlwaysActive ? 2 : 1,
+					accounts: includeAlwaysActive ? [scheduledAccount, alwaysAccount] : [scheduledAccount],
+				},
+				{
+					start: "2026-05-25T17:00:00Z",
+					end: "2026-06-01T00:00:00Z",
+					activeAccountCount: includeAlwaysActive ? 1 : 0,
+					accounts: includeAlwaysActive ? [alwaysAccount] : [],
+				},
+			],
+			summary: {
+				minimumCoverage: includeAlwaysActive ? 1 : 0,
+				uncoveredMinutes: includeAlwaysActive ? 0 : 9600,
+				peakCoverage: includeAlwaysActive ? 2 : 1,
+				averageCoverage: includeAlwaysActive ? 1.05 : 0.05,
+				nextGapStart: includeAlwaysActive ? null : "2026-05-25T00:00:00Z",
+				nextGapEnd: includeAlwaysActive ? null : "2026-05-25T09:00:00Z",
+			},
+		});
+	}),
+
 	http.post("/api/active-timeframes", async ({ request }) => {
 		const payload = await parseJsonBody(request, AccountActiveTimeframePayloadSchema);
 		if (!payload) {

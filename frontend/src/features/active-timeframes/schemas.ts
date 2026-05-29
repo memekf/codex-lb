@@ -39,5 +39,36 @@ export const AccountActiveTimeframeDeleteResponseSchema = z.object({
   status: z.string(),
 });
 
+export const AccountActiveTimeframeCoverageAccountSchema = z.object({
+  accountId: z.string(),
+  label: z.string(),
+});
+
+export const AccountActiveTimeframeCoverageSegmentSchema = z.object({
+  start: z.string().datetime({ offset: true }),
+  end: z.string().datetime({ offset: true }),
+  activeAccountCount: z.number().int(),
+  accounts: z.array(AccountActiveTimeframeCoverageAccountSchema).default([]),
+});
+
+export const AccountActiveTimeframeCoverageSummarySchema = z.object({
+  minimumCoverage: z.number().int(),
+  uncoveredMinutes: z.number().int(),
+  peakCoverage: z.number().int(),
+  averageCoverage: z.number(),
+  nextGapStart: z.string().datetime({ offset: true }).nullable(),
+  nextGapEnd: z.string().datetime({ offset: true }).nullable(),
+});
+
+export const AccountActiveTimeframeCoverageSchema = z.object({
+  weekStart: z.string().datetime({ offset: true }),
+  weekEnd: z.string().datetime({ offset: true }),
+  segments: z.array(AccountActiveTimeframeCoverageSegmentSchema),
+  summary: AccountActiveTimeframeCoverageSummarySchema,
+});
+
 export type AccountActiveTimeframe = z.infer<typeof AccountActiveTimeframeSchema>;
 export type AccountActiveTimeframeUpsertRequest = z.infer<typeof AccountActiveTimeframeUpsertRequestSchema>;
+export type AccountActiveTimeframeCoverage = z.infer<typeof AccountActiveTimeframeCoverageSchema>;
+export type AccountActiveTimeframeCoverageSegment = z.infer<typeof AccountActiveTimeframeCoverageSegmentSchema>;
+export type AccountActiveTimeframeCoverageSummary = z.infer<typeof AccountActiveTimeframeCoverageSummarySchema>;

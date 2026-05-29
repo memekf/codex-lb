@@ -13,6 +13,13 @@ describe("active timeframes flow", () => {
     renderWithProviders(<App />);
 
     expect(await screen.findByRole("heading", { name: "Timeframes" })).toBeInTheDocument();
+    expect(await screen.findByText("Weekly coverage")).toBeInTheDocument();
+    expect(screen.getByLabelText("Include always-active accounts")).toBeChecked();
+    expect(screen.getByText("Minimum")).toBeInTheDocument();
+    expect(screen.getByTitle("Mon 09:00-13:00 | 2 active | primary@example.com, secondary@example.com")).toBeInTheDocument();
+
+    await user.click(screen.getByLabelText("Include always-active accounts"));
+    expect(await screen.findByTitle("Mon 09:00-13:00 | 1 active | primary@example.com")).toBeInTheDocument();
     expect(await screen.findByText("Office hours")).toBeInTheDocument();
 
     await user.clear(screen.getByLabelText("Display name"));

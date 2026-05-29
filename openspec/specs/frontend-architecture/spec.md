@@ -279,6 +279,25 @@ The dashboard SHALL include a Timeframes tab or section that lists managed activ
 - **THEN** the app surfaces the backend in-use error
 - **AND** keeps the timeframe visible
 
+### Requirement: Timeframes page renders weekly coverage timetable
+
+The Timeframes page SHALL render a weekly active-account coverage timetable from backend-provided coverage segments. The UI SHALL render seven day rows, a 24-hour horizontal scale, proportional coverage blocks, and a coverage summary beside the timetable on desktop or below it on narrow screens.
+
+#### Scenario: Timetable renders day coverage
+- **WHEN** coverage data is available
+- **THEN** the Timeframes page renders one row per weekday with proportional segments for that day's coverage
+- **AND** each segment exposes a tooltip/title containing the day/time range, active account count, and account labels
+
+#### Scenario: Visual scale communicates coverage health
+- **WHEN** a segment has zero active accounts
+- **THEN** the timetable renders it as a visible zero-coverage gap
+- **AND** higher active-account counts are rendered with healthier colors than lower counts
+
+#### Scenario: Include always-active toggle refetches coverage
+- **WHEN** an operator toggles `Include always-active accounts`
+- **THEN** the frontend refetches coverage with the selected `includeAlwaysActive` value
+- **AND** existing active timeframe CRUD behavior remains unchanged
+
 ### Requirement: Account views expose active timeframe assignment and health
 
 Account list/detail views SHALL show active timeframe assignment and current schedule state beside existing account health signals. Account detail SHALL include an active timeframe dropdown that can save or clear assignment.
@@ -296,4 +315,3 @@ Account list/detail views SHALL show active timeframe assignment and current sch
 #### Scenario: Account list shows inactive timeframe problem
 - **WHEN** an otherwise usable account is outside its active timeframe
 - **THEN** account list/detail views show the timeframe name or reason, next change time when available, and an action-needed or unavailable routing status
-

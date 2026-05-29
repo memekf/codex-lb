@@ -4,8 +4,11 @@ import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { StatusBadge } from "@/components/status-badge";
-import { useActiveTimeframes } from "@/features/active-timeframes/hooks/use-active-timeframes";
+import { WeeklyCoverageSummary } from "@/features/active-timeframes/components/weekly-coverage-summary";
+import { WeeklyCoverageTimetable } from "@/features/active-timeframes/components/weekly-coverage-timetable";
+import { useActiveTimeframeCoverage, useActiveTimeframes } from "@/features/active-timeframes/hooks/use-active-timeframes";
 import type { AccountActiveTimeframe, AccountActiveTimeframeUpsertRequest } from "@/features/active-timeframes/schemas";
 import { WEEKDAYS, weekdayLabel } from "@/features/active-timeframes/utils";
 import { formatDateTimeInline } from "@/utils/formatters";
@@ -27,6 +30,8 @@ export function ActiveTimeframesPage() {
   const timeframes = useMemo(() => timeframesQuery.data ?? [], [timeframesQuery.data]);
   const [editing, setEditing] = useState<AccountActiveTimeframe | null>(null);
   const [form, setForm] = useState(DEFAULT_FORM);
+  const [includeAlwaysActive, setIncludeAlwaysActive] = useState(true);
+  const coverageQuery = useActiveTimeframeCoverage({ includeAlwaysActive });
   const busy = createMutation.isPending || updateMutation.isPending || deleteMutation.isPending;
 
   const resetForm = () => {
@@ -50,6 +55,38 @@ export function ActiveTimeframesPage() {
         <h1 className="text-2xl font-semibold tracking-tight">Timeframes</h1>
         <p className="mt-1 text-sm text-muted-foreground">Control when assigned accounts can start new upstream work.</p>
       </div>
+
+      <section className="rounded-lg border bg-card p-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold">Coverage</h2>
+            <p className="mt-1 text-xs text-muted-foreground">A schedule-only view of active account availability.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch
+              id="include-always-active"
+              checked={includeAlwaysActive}
+              onCheckedChange={setIncludeAlwaysActive}
+              size="sm"
+            />
+            <label htmlFor="include-always-active" className="text-xs font-medium text-muted-foreground">
+              Include always-active accounts
+            </label>
+          </div>
+        </div>
+        {coverageQuery.isLoading ? (
+          <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">Loading coverage...</div>
+        ) : coverageQuery.isError ? (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
+            Coverage could not be loaded.
+          </div>
+        ) : coverageQuery.data ? (
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_16rem]">
+            <WeeklyCoverageTimetable coverage={coverageQuery.data} />
+            <WeeklyCoverageSummary summary={coverageQuery.data.summary} />
+          </div>
+        ) : null}
+      </section>
 
       <div className="grid gap-4 lg:grid-cols-[24rem_minmax(0,1fr)]">
         <form

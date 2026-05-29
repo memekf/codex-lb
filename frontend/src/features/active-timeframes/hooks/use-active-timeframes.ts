@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import {
   createActiveTimeframe,
   deleteActiveTimeframe,
+  getActiveTimeframeCoverage,
   listActiveTimeframes,
   updateActiveTimeframe,
 } from "@/features/active-timeframes/api";
@@ -13,6 +14,7 @@ export function useActiveTimeframes() {
   const queryClient = useQueryClient();
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ["active-timeframes", "list"] });
+    void queryClient.invalidateQueries({ queryKey: ["active-timeframes", "coverage"] });
     void queryClient.invalidateQueries({ queryKey: ["accounts", "list"] });
     void queryClient.invalidateQueries({ queryKey: ["dashboard", "overview"] });
   };
@@ -54,4 +56,16 @@ export function useActiveTimeframes() {
   });
 
   return { timeframesQuery, createMutation, updateMutation, deleteMutation };
+}
+
+export function useActiveTimeframeCoverage(params: {
+  weekStart?: string;
+  includeAlwaysActive: boolean;
+}) {
+  return useQuery({
+    queryKey: ["active-timeframes", "coverage", params.weekStart ?? null, params.includeAlwaysActive],
+    queryFn: () => getActiveTimeframeCoverage(params),
+    refetchInterval: 30_000,
+    refetchIntervalInBackground: false,
+  });
 }
